@@ -81,8 +81,11 @@ libc = "0.2.126"
 
 [features]
 test_mode = []
-enterprise = []
+enterprise = ["trc/enterprise", "store/enterprise", "directory/enterprise"]
 foundation = []
+# dev_enterprise: Enables enterprise features without requiring a valid license key.
+# Use for development/testing only. Bypasses license validation and provides unlimited accounts.
+dev_enterprise = ["enterprise"]
 
 [dev-dependencies]
 tokio = { version = "1.47", features = ["full"] }

@@ -110,6 +110,12 @@ pub enum AlertContentToken {
 }
 
 impl Core {
+    #[cfg(feature = "dev_enterprise")]
+    pub fn is_enterprise_edition(&self) -> bool {
+        true
+    }
+
+    #[cfg(not(feature = "dev_enterprise"))]
     pub fn is_enterprise_edition(&self) -> bool {
         self.enterprise
             .as_ref()
@@ -132,6 +138,12 @@ impl Server {
         self.core.is_enterprise_edition()
     }
 
+    #[cfg(feature = "dev_enterprise")]
+    pub fn licensed_accounts(&self) -> u32 {
+        u32::MAX
+    }
+
+    #[cfg(not(feature = "dev_enterprise"))]
     pub fn licensed_accounts(&self) -> u32 {
         self.core
             .enterprise

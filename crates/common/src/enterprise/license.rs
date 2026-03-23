@@ -19,20 +19,25 @@
  * for copyright infringement, breach of contract, and fraud.
  */
 
+#[cfg(not(feature = "dev_enterprise"))]
 use crate::manager::fetch_resource;
 use base64::{Engine, engine::general_purpose::STANDARD};
+#[cfg(not(feature = "dev_enterprise"))]
 use hyper::{HeaderMap, header::AUTHORIZATION};
 use ring::signature::{ED25519, UnparsedPublicKey};
 use std::{
     fmt::{Display, Formatter},
     time::Duration,
 };
+#[cfg(not(feature = "dev_enterprise"))]
 use store::write::now;
+#[cfg(not(feature = "dev_enterprise"))]
 use trc::ServerEvent;
 
-//const LICENSING_API: &str = "https://localhost:444/api/license/";
+#[cfg(not(feature = "dev_enterprise"))]
 const LICENSING_API: &str = "https://license.stalw.art/api/license/";
-const RENEW_THRESHOLD: u64 = 60 * 60 * 24 * 4; // 4 days
+#[cfg(not(feature = "dev_enterprise"))]
+const RENEW_THRESHOLD: u64 = 60 * 60 * 24 * 4;
 
 pub struct LicenseValidator {
     public_key: UnparsedPublicKey<Vec<u8>>,
@@ -151,6 +156,20 @@ impl LicenseValidator {
 }
 
 impl LicenseKey {
+    #[cfg(feature = "dev_enterprise")]
+    pub fn new(
+        _license_key: impl AsRef<str>,
+        hostname: impl AsRef<str>,
+    ) -> Result<Self, LicenseError> {
+        Ok(LicenseKey {
+            valid_from: 0,
+            valid_to: u64::MAX,
+            domain: Self::base_domain(hostname).unwrap_or_else(|_| "localhost".to_string()),
+            accounts: u32::MAX,
+        })
+    }
+
+    #[cfg(not(feature = "dev_enterprise"))]
     pub fn new(
         license_key: impl AsRef<str>,
         hostname: impl AsRef<str>,
@@ -171,6 +190,17 @@ impl LicenseKey {
             })
     }
 
+    #[cfg(feature = "dev_enterprise")]
+    pub fn invalid(domain: impl AsRef<str>) -> Self {
+        LicenseKey {
+            valid_from: 0,
+            valid_to: u64::MAX,
+            domain: Self::base_domain(domain).unwrap_or_else(|_| "localhost".to_string()),
+            accounts: u32::MAX,
+        }
+    }
+
+    #[cfg(not(feature = "dev_enterprise"))]
     pub fn invalid(domain: impl AsRef<str>) -> Self {
         LicenseKey {
             valid_from: 0,
@@ -180,6 +210,20 @@ impl LicenseKey {
         }
     }
 
+    #[cfg(feature = "dev_enterprise")]
+    pub async fn try_renew(&self, _api_key: &str) -> Result<RenewedLicense, LicenseError> {
+        Ok(RenewedLicense {
+            key: LicenseKey {
+                valid_from: 0,
+                valid_to: u64::MAX,
+                domain: self.domain.clone(),
+                accounts: u32::MAX,
+            },
+            encoded_key: "DEV_ENTERPRISE_LICENSE".to_string(),
+        })
+    }
+
+    #[cfg(not(feature = "dev_enterprise"))]
     pub async fn try_renew(&self, api_key: &str) -> Result<RenewedLicense, LicenseError> {
         let mut headers = HeaderMap::new();
         headers.insert(
@@ -227,19 +271,43 @@ impl LicenseKey {
         }
     }
 
+    #[cfg(feature = "dev_enterprise")]
+    pub fn is_near_expiration(&self) -> bool {
+        false
+    }
+
+    #[cfg(not(feature = "dev_enterprise"))]
     pub fn is_near_expiration(&self) -> bool {
         let now = now();
         self.valid_to.saturating_sub(now) <= RENEW_THRESHOLD
     }
 
+    #[cfg(feature = "dev_enterprise")]
+    pub fn expires_in(&self) -> Duration {
+        Duration::MAX
+    }
+
+    #[cfg(not(feature = "dev_enterprise"))]
     pub fn expires_in(&self) -> Duration {
         Duration::from_secs(self.valid_to.saturating_sub(now()))
     }
 
+    #[cfg(feature = "dev_enterprise")]
+    pub fn renew_in(&self) -> Duration {
+        Duration::MAX
+    }
+
+    #[cfg(not(feature = "dev_enterprise"))]
     pub fn renew_in(&self) -> Duration {
         Duration::from_secs(self.valid_to.saturating_sub(now() + RENEW_THRESHOLD))
     }
 
+    #[cfg(feature = "dev_enterprise")]
+    pub fn is_expired(&self) -> bool {
+        false
+    }
+
+    #[cfg(not(feature = "dev_enterprise"))]
     pub fn is_expired(&self) -> bool {
         let now = now();
         now >= self.valid_to || now < self.valid_from
@@ -276,5 +344,48 @@ impl Display for LicenseError {
                 write!(f, "Failed to renew license: {reason}")
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[cfg(feature = "dev_enterprise")]
+    fn test_dev_enterprise_license_new() {
+        let license = LicenseKey::new("any_invalid_key", "example.com").unwrap();
+        assert_eq!(license.accounts, u32::MAX);
+        assert_eq!(license.valid_to, u64::MAX);
+        assert!(!license.is_expired());
+    }
+
+    #[test]
+    #[cfg(feature = "dev_enterprise")]
+    fn test_dev_enterprise_license_invalid() {
+        let license = LicenseKey::invalid("example.com");
+        assert_eq!(license.accounts, u32::MAX);
+        assert_eq!(license.valid_to, u64::MAX);
+        assert!(!license.is_expired());
+    }
+
+    #[test]
+    #[cfg(feature = "dev_enterprise")]
+    fn test_dev_enterprise_license_expiration() {
+        let license = LicenseKey::new("any_key", "example.com").unwrap();
+        assert!(!license.is_expired());
+        assert!(!license.is_near_expiration());
+        assert_eq!(license.expires_in(), Duration::MAX);
+        assert_eq!(license.renew_in(), Duration::MAX);
+    }
+
+    #[test]
+    #[cfg(feature = "dev_enterprise")]
+    fn test_dev_enterprise_license_renewal() {
+        let license = LicenseKey::new("any_key", "example.com").unwrap();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let renewed = rt.block_on(license.try_renew("any_api_key")).unwrap();
+        assert_eq!(renewed.key.accounts, u32::MAX);
+        assert_eq!(renewed.encoded_key, "DEV_ENTERPRISE_LICENSE");
     }
 }

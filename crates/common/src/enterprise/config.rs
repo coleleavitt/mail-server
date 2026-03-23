@@ -17,13 +17,16 @@ use crate::{
     manager::config::ConfigManager,
 };
 use ahash::AHashMap;
+#[cfg(not(feature = "dev_enterprise"))]
 use directory::{Type, backend::internal::manage::ManageDirectory};
 use std::{sync::Arc, time::Duration};
 use store::{Store, Stores};
 use trc::{EventType, MetricType, TOTAL_EVENT_COUNT};
+#[cfg(not(feature = "dev_enterprise"))]
+use utils::config::ConfigKey;
 use utils::{
     config::{
-        Config, ConfigKey,
+        Config,
         cron::SimpleCron,
         utils::{AsKey, ParseValue},
     },
@@ -31,6 +34,34 @@ use utils::{
 };
 
 impl Enterprise {
+    #[cfg(feature = "dev_enterprise")]
+    pub async fn parse(
+        config: &mut Config,
+        _config_manager: &ConfigManager,
+        stores: &Stores,
+        _data: &Store,
+    ) -> Option<Self> {
+        let server_hostname = config
+            .value("server.hostname")
+            .or_else(|| config.value("lookup.default.hostname"))
+            .unwrap_or("localhost");
+
+        let license = LicenseKey {
+            valid_from: 0,
+            valid_to: u64::MAX,
+            domain: server_hostname.to_string(),
+            accounts: u32::MAX,
+        };
+
+        trc::event!(
+            Server(trc::ServerEvent::Licensing),
+            Details = "dev_enterprise feature enabled - bypassing license validation",
+        );
+
+        Self::parse_features(config, stores, license)
+    }
+
+    #[cfg(not(feature = "dev_enterprise"))]
     pub async fn parse(
         config: &mut Config,
         config_manager: &ConfigManager,
@@ -79,7 +110,6 @@ impl Enterprise {
             }
         };
 
-        // Report error
         let license = match license_result {
             Ok(license) => license,
             Err(err) => {
@@ -88,7 +118,6 @@ impl Enterprise {
             }
         };
 
-        // Update the license if a new one was obtained
         if let Some(license) = update_license {
             config
                 .keys
@@ -133,6 +162,10 @@ impl Enterprise {
             _ => (),
         }
 
+        Self::parse_features(config, stores, license)
+    }
+
+    fn parse_features(config: &mut Config, stores: &Stores, license: LicenseKey) -> Option<Self> {
         let trace_store = if config
             .property_or_default("tracing.history.enable", "false")
             .unwrap_or(false)

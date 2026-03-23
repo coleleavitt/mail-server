@@ -121,14 +121,10 @@ impl<T: SessionStream> Session<T> {
                     )
                     .await
                 {
-                    ScriptResult::Accept { modifications } => {
-                        if !modifications.is_empty() {
-                            for modification in modifications {
-                                if let ScriptModification::SetEnvelope { name, value } =
-                                    modification
-                                {
-                                    self.data.apply_envelope_modification(name, value);
-                                }
+                    ScriptResult::Accept { modifications } if !modifications.is_empty() => {
+                        for modification in modifications {
+                            if let ScriptModification::SetEnvelope { name, value } = modification {
+                                self.data.apply_envelope_modification(name, value);
                             }
                         }
                     }

@@ -346,25 +346,23 @@ impl LockRequestHandler for Server {
     ) -> crate::Result<()> {
         let no_if_headers = headers.if_.is_empty();
         match method {
-            DavMethod::GET | DavMethod::HEAD => {
+            DavMethod::GET | DavMethod::HEAD
                 // Return early for GET/HEAD requests without If headers
-                if no_if_headers {
+                if no_if_headers => {
                     return Ok(());
                 }
-            }
             DavMethod::COPY
             | DavMethod::MOVE
             | DavMethod::POST
             | DavMethod::PUT
-            | DavMethod::PATCH => {
+            | DavMethod::PATCH
                 if headers.overwrite_fail
                     && resources.last().is_some_and(|r| {
                         r.etag.is_some() || r.document_id.is_some_and(|id| id != u32::MAX)
                     })
-                {
+                => {
                     return Err(DavError::Code(StatusCode::PRECONDITION_FAILED));
                 }
-            }
             _ => {}
         }
 

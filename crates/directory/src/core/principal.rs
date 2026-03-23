@@ -875,10 +875,8 @@ impl PrincipalSet {
     {
         if let Some(value) = self.fields.get_mut(&key) {
             match value {
-                PrincipalValue::String(s) => {
-                    if !f(s) {
-                        self.fields.remove(&key);
-                    }
+                PrincipalValue::String(s) if !f(s) => {
+                    self.fields.remove(&key);
                 }
                 PrincipalValue::StringList(l) => {
                     l.retain(f);
@@ -897,10 +895,8 @@ impl PrincipalSet {
     {
         if let Some(value) = self.fields.get_mut(&key) {
             match value {
-                PrincipalValue::Integer(i) => {
-                    if !f(i) {
-                        self.fields.remove(&key);
-                    }
+                PrincipalValue::Integer(i) if !f(i) => {
+                    self.fields.remove(&key);
                 }
                 PrincipalValue::IntegerList(l) => {
                     l.retain(f);

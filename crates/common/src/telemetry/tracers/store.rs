@@ -57,7 +57,7 @@ pub(crate) fn spawn_store_tracer(builder: SubscriberBuilder, settings: StoreTrac
                                     [span.as_ref()]
                                         .into_iter()
                                         .chain(events.iter().map(|event| event.as_ref()))
-                                        .chain([event.as_ref()].into_iter()),
+                                        .chain([event.as_ref()]),
                                     events.len() + 2,
                                 ),
                             )
@@ -253,44 +253,39 @@ pub fn build_span_document(
 
         for (key, value) in event.keys {
             match (key, value) {
-                (Key::QueueId, Value::UInt(queue_id)) => {
-                    if index_fields.is_empty()
-                        || index_fields.contains(&TracingSearchField::QueueId.into())
-                    {
-                        document.index_unsigned(TracingSearchField::QueueId, queue_id);
-                    }
+                (Key::QueueId, Value::UInt(queue_id))
+                    if (index_fields.is_empty()
+                        || index_fields.contains(&TracingSearchField::QueueId.into())) =>
+                {
+                    document.index_unsigned(TracingSearchField::QueueId, queue_id);
                 }
-                (Key::From | Key::To | Key::Domain | Key::Hostname, Value::String(address)) => {
-                    if index_fields.is_empty()
-                        || index_fields.contains(&TracingSearchField::Keywords.into())
-                    {
-                        keywords.insert(address.to_string());
-                    }
+                (Key::From | Key::To | Key::Domain | Key::Hostname, Value::String(address))
+                    if (index_fields.is_empty()
+                        || index_fields.contains(&TracingSearchField::Keywords.into())) =>
+                {
+                    keywords.insert(address.to_string());
                 }
-                (Key::To, Value::Array(value)) => {
-                    if index_fields.is_empty()
-                        || index_fields.contains(&TracingSearchField::Keywords.into())
-                    {
-                        for value in value {
-                            if let Value::String(address) = value {
-                                keywords.insert(address.to_string());
-                            }
+                (Key::To, Value::Array(value))
+                    if (index_fields.is_empty()
+                        || index_fields.contains(&TracingSearchField::Keywords.into())) =>
+                {
+                    for value in value {
+                        if let Value::String(address) = value {
+                            keywords.insert(address.to_string());
                         }
                     }
                 }
-                (Key::RemoteIp, Value::Ipv4(ip)) => {
-                    if index_fields.is_empty()
-                        || index_fields.contains(&TracingSearchField::Keywords.into())
-                    {
-                        keywords.insert(ip.to_string());
-                    }
+                (Key::RemoteIp, Value::Ipv4(ip))
+                    if (index_fields.is_empty()
+                        || index_fields.contains(&TracingSearchField::Keywords.into())) =>
+                {
+                    keywords.insert(ip.to_string());
                 }
-                (Key::RemoteIp, Value::Ipv6(ip)) => {
-                    if index_fields.is_empty()
-                        || index_fields.contains(&TracingSearchField::Keywords.into())
-                    {
-                        keywords.insert(ip.to_string());
-                    }
+                (Key::RemoteIp, Value::Ipv6(ip))
+                    if (index_fields.is_empty()
+                        || index_fields.contains(&TracingSearchField::Keywords.into())) =>
+                {
+                    keywords.insert(ip.to_string());
                 }
 
                 _ => {}

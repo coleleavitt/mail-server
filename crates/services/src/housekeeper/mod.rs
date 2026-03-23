@@ -727,7 +727,7 @@ impl Purge for Server {
                 "data",
                 [0u8]
                     .into_iter()
-                    .chain(store_idx.to_be_bytes().into_iter())
+                    .chain(store_idx.to_be_bytes())
                     .collect::<Vec<_>>()
                     .into(),
             ),
@@ -735,7 +735,7 @@ impl Purge for Server {
                 "blob",
                 [1u8]
                     .into_iter()
-                    .chain(store_idx.to_be_bytes().into_iter())
+                    .chain(store_idx.to_be_bytes())
                     .collect::<Vec<_>>()
                     .into(),
             ),
@@ -743,7 +743,7 @@ impl Purge for Server {
                 "in-memory",
                 [2u8]
                     .into_iter()
-                    .chain(store_idx.to_be_bytes().into_iter())
+                    .chain(store_idx.to_be_bytes())
                     .collect::<Vec<_>>()
                     .into(),
             ),

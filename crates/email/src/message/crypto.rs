@@ -451,10 +451,11 @@ impl EncryptMessage for Message<'_> {
             }
 
             match text_part {
-                Some(text) if self.parts.len() == 1 || is_multipart => {
-                    if text.trim_start().starts_with("-----BEGIN PGP MESSAGE-----") {
-                        return true;
-                    }
+                Some(text)
+                    if (self.parts.len() == 1 || is_multipart)
+                        && text.trim_start().starts_with("-----BEGIN PGP MESSAGE-----") =>
+                {
+                    return true;
                 }
                 _ => (),
             }

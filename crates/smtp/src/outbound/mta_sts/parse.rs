@@ -50,10 +50,8 @@ impl ParsePolicy for Policy {
                             _ => return Err(format!("Unsupported mode {value:?}.")),
                         };
                     }
-                    "version" => {
-                        if !value.eq_ignore_ascii_case("STSv1") {
-                            return Err(format!("Unsupported version {value:?}."));
-                        }
+                    "version" if !value.eq_ignore_ascii_case("STSv1") => {
+                        return Err(format!("Unsupported version {value:?}."));
                     }
                     _ => (),
                 }

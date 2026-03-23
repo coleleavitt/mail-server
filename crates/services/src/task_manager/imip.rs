@@ -571,8 +571,7 @@ pub async fn build_itip_template(
                 CalendarTemplateVariable::Key,
                 locale.calendar_imip_footer_2.to_string(),
             )],
-        ]
-        .into_iter(),
+        ],
     );
 
     Details {

@@ -276,7 +276,7 @@ impl ContactCardQuery for Server {
                 )),
                 ContactCardComparator::Updated => {
                     let mut updated = created_to_updated.clone();
-                    updated.sort_by(|a, b| a.updated.cmp(&b.updated));
+                    updated.sort_by_key(|a| a.updated);
                     Ok(SearchComparator::sorted_set(
                         updated
                             .iter()

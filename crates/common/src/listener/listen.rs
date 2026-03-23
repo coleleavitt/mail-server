@@ -288,6 +288,7 @@ impl SocketOpts {
                 Details = "Failed to set TTL",
             );
         }
+        #[allow(deprecated)] // SO_LINGER blocking is intentional for user-configured linger
         if self.linger.is_some()
             && let Err(err) = stream.set_linger(self.linger)
         {

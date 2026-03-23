@@ -150,10 +150,10 @@ impl Collector {
             )
             | EventType::TlsRpt(_)
             | EventType::MtaSts(_)
-            | EventType::Dane(_) => {
-                if elapsed > 0 {
-                    DNS_LOOKUP_TIME.observe(elapsed);
-                }
+            | EventType::Dane(_)
+                if elapsed > 0 =>
+            {
+                DNS_LOOKUP_TIME.observe(elapsed);
             }
             EventType::MessageIngest(
                 MessageIngestEvent::Ham

@@ -166,7 +166,7 @@ impl SearchStore {
                             }
                         }
                         // Add any remaining results not yet in the index
-                        ordered_results.extend(results.into_iter());
+                        ordered_results.extend(results);
 
                         if local.is_empty() {
                             return Ok(ordered_results);

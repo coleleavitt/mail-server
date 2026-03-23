@@ -12,6 +12,7 @@ use mail_auth::{
     dkim::{Canonicalization, Done},
 };
 use mail_parser::decoders::base64::base64_decode;
+use rustls_pki_types::{PrivateKeyDer, pem::PemObject};
 use utils::config::{
     Config,
     utils::{AsKey, ParseValue},
@@ -243,21 +244,27 @@ pub fn build_signature(config: &mut Config, id: &str) -> Option<(DkimSigner, Arc
                 .value_require(("signature", id, "private-key"))?
                 .trim()
                 .to_string();
-            let key = RsaKey::<Sha256>::from_rsa_pem(&pk)
-                .or_else(|_| RsaKey::<Sha256>::from_pkcs8_pem(&pk))
+            let der = PrivateKeyDer::from_pem_slice(pk.as_bytes())
                 .map_err(|err| {
                     config.new_build_error(
                         ("signature", id, "private-key"),
-                        format!("Failed to build RSA key: {err}",),
+                        format!("Failed to parse PEM: {err}"),
                     )
                 })
                 .ok()?;
-            let key_clone = RsaKey::<Sha256>::from_rsa_pem(&pk)
-                .or_else(|_| RsaKey::<Sha256>::from_pkcs8_pem(&pk))
+            let key = RsaKey::<Sha256>::from_key_der(der.clone_key())
                 .map_err(|err| {
                     config.new_build_error(
                         ("signature", id, "private-key"),
-                        format!("Failed to build RSA key: {err}",),
+                        format!("Failed to build RSA key: {err}"),
+                    )
+                })
+                .ok()?;
+            let key_clone = RsaKey::<Sha256>::from_key_der(der)
+                .map_err(|err| {
+                    config.new_build_error(
+                        ("signature", id, "private-key"),
+                        format!("Failed to build RSA key: {err}"),
                     )
                 })
                 .ok()?;

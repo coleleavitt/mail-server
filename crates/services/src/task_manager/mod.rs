@@ -157,7 +157,7 @@ pub fn spawn_task_manager(inner: Arc<Inner>) {
 
                         // Remove successful entries from queue
                         let mut to_delete = Vec::with_capacity(locked_batch.len());
-                        for (task, result) in locked_batch.into_iter().zip(success.into_iter()) {
+                        for (task, result) in locked_batch.into_iter().zip(success) {
                             if result.is_done() {
                                 to_delete.push(task);
                             }

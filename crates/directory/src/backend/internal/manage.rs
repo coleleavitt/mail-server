@@ -1423,13 +1423,9 @@ impl ManageDirectory for Store {
                         let mut deleted_primary = false;
                         principal.data.retain(|v| match v {
                             PrincipalData::EmailAlias(v) => v != &email,
-                            PrincipalData::PrimaryEmail(v) => {
-                                if v == &email {
-                                    deleted_primary = true;
-                                    false
-                                } else {
-                                    true
-                                }
+                            PrincipalData::PrimaryEmail(v) if v == &email => {
+                                deleted_primary = true;
+                                false
                             }
                             _ => true,
                         });
@@ -1965,20 +1961,16 @@ impl ManageDirectory for Store {
                     let mut found = false;
                     for data in &principal.data {
                         match (data, change.field) {
-                            (PrincipalData::Url(url), PrincipalField::Urls) => {
-                                if url == &item {
-                                    found = true;
-                                    break;
-                                }
+                            (PrincipalData::Url(url), PrincipalField::Urls) if url == &item => {
+                                found = true;
+                                break;
                             }
                             (
                                 PrincipalData::ExternalMember(email),
                                 PrincipalField::ExternalMembers,
-                            ) => {
-                                if email == &item {
-                                    found = true;
-                                    break;
-                                }
+                            ) if email == &item => {
+                                found = true;
+                                break;
                             }
                             _ => {}
                         }
@@ -2382,42 +2374,42 @@ impl ManageDirectory for Store {
                 PrincipalData::Tenant(tid) => {
                     tenant_id = Some(tid);
                 }
-                PrincipalData::Description(description) => {
-                    if fields.is_empty() || fields.contains(&PrincipalField::Description) {
-                        result.set(PrincipalField::Description, description);
-                    }
+                PrincipalData::Description(description)
+                    if (fields.is_empty() || fields.contains(&PrincipalField::Description)) =>
+                {
+                    result.set(PrincipalField::Description, description);
                 }
                 PrincipalData::Password(secret)
                 | PrincipalData::AppPassword(secret)
-                | PrincipalData::OtpAuth(secret) => {
-                    if fields.is_empty() || fields.contains(&PrincipalField::Secrets) {
-                        result.append_str(PrincipalField::Secrets, secret);
-                    }
+                | PrincipalData::OtpAuth(secret)
+                    if (fields.is_empty() || fields.contains(&PrincipalField::Secrets)) =>
+                {
+                    result.append_str(PrincipalField::Secrets, secret);
                 }
-                PrincipalData::PrimaryEmail(email) | PrincipalData::EmailAlias(email) => {
-                    if fields.is_empty() || fields.contains(&PrincipalField::Emails) {
-                        result.append_str(PrincipalField::Emails, email);
-                    }
+                PrincipalData::PrimaryEmail(email) | PrincipalData::EmailAlias(email)
+                    if (fields.is_empty() || fields.contains(&PrincipalField::Emails)) =>
+                {
+                    result.append_str(PrincipalField::Emails, email);
                 }
-                PrincipalData::Picture(picture) => {
-                    if fields.is_empty() || fields.contains(&PrincipalField::Picture) {
-                        result.set(PrincipalField::Picture, picture);
-                    }
+                PrincipalData::Picture(picture)
+                    if (fields.is_empty() || fields.contains(&PrincipalField::Picture)) =>
+                {
+                    result.set(PrincipalField::Picture, picture);
                 }
-                PrincipalData::Locale(locale) => {
-                    if fields.is_empty() || fields.contains(&PrincipalField::Locale) {
-                        result.set(PrincipalField::Locale, locale);
-                    }
+                PrincipalData::Locale(locale)
+                    if (fields.is_empty() || fields.contains(&PrincipalField::Locale)) =>
+                {
+                    result.set(PrincipalField::Locale, locale);
                 }
-                PrincipalData::ExternalMember(member) => {
-                    if fields.is_empty() || fields.contains(&PrincipalField::ExternalMembers) {
-                        result.append_str(PrincipalField::ExternalMembers, member);
-                    }
+                PrincipalData::ExternalMember(member)
+                    if (fields.is_empty() || fields.contains(&PrincipalField::ExternalMembers)) =>
+                {
+                    result.append_str(PrincipalField::ExternalMembers, member);
                 }
-                PrincipalData::Url(url) => {
-                    if fields.is_empty() || fields.contains(&PrincipalField::Urls) {
-                        result.append_str(PrincipalField::Urls, url);
-                    }
+                PrincipalData::Url(url)
+                    if (fields.is_empty() || fields.contains(&PrincipalField::Urls)) =>
+                {
+                    result.append_str(PrincipalField::Urls, url);
                 }
                 PrincipalData::DirectoryQuota { quota, typ } => {
                     directory_quotas.push((typ, quota));

@@ -550,12 +550,12 @@ fn value_to_default_alert(
         };
 
         match (key, value) {
-            (CalendarProperty::Type, Value::Element(CalendarValue::Type(value))) => {
-                if value != JSCalendarType::Alert {
-                    return Err(SetError::invalid_properties()
-                        .with_property(CalendarProperty::Trigger)
-                        .with_description("Invalid alert object type."));
-                }
+            (CalendarProperty::Type, Value::Element(CalendarValue::Type(value)))
+                if value != JSCalendarType::Alert =>
+            {
+                return Err(SetError::invalid_properties()
+                    .with_property(CalendarProperty::Trigger)
+                    .with_description("Invalid alert object type."));
             }
             (
                 CalendarProperty::Action,
@@ -583,12 +583,12 @@ fn value_to_default_alert(
                             alert.offset = value;
                             has_offset = true;
                         }
-                        (CalendarProperty::Offset, Value::Element(CalendarValue::Type(value))) => {
-                            if value != JSCalendarType::OffsetTrigger {
-                                return Err(SetError::invalid_properties()
-                                    .with_property(CalendarProperty::Trigger)
-                                    .with_description("Invalid alert trigger type."));
-                            }
+                        (CalendarProperty::Offset, Value::Element(CalendarValue::Type(value)))
+                            if value != JSCalendarType::OffsetTrigger =>
+                        {
+                            return Err(SetError::invalid_properties()
+                                .with_property(CalendarProperty::Trigger)
+                                .with_description("Invalid alert trigger type."));
                         }
                         _ => {}
                     }

@@ -454,10 +454,10 @@ impl PropFindRequestHandler for Server {
             let mut calendar_filter = None;
             if let Some(query_filter) = &query_filter {
                 match (query_filter, &archive) {
-                    (DavQueryFilter::Addressbook(filter), ArchivedResource::ContactCard(card)) => {
-                        if !vcard_query(&card.inner.card, filter) {
-                            continue;
-                        }
+                    (DavQueryFilter::Addressbook(filter), ArchivedResource::ContactCard(card))
+                        if !vcard_query(&card.inner.card, filter) =>
+                    {
+                        continue;
                     }
                     (
                         DavQueryFilter::Calendar {

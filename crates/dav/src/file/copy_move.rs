@@ -459,7 +459,7 @@ async fn copy_container(
     } else {
         Vec::new()
     };
-    copy_files.sort_unstable_by(|a, b| a.1.cmp(&b.1));
+    copy_files.sort_unstable_by_key(|a| a.1);
     let now = now() as i64;
     let mut next_document_id = server
         .store()

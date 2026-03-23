@@ -60,11 +60,11 @@ impl<T: SessionStream> Session<T> {
                     self.write(b"334 Go ahead.\r\n").await?;
                     return Ok(true);
                 }
-                (AUTH_LOGIN, Credentials::Plain { username, secret }) => {
-                    if username.is_empty() && secret.is_empty() {
-                        self.write(b"334 VXNlcm5hbWU6\r\n").await?;
-                        return Ok(true);
-                    }
+                (AUTH_LOGIN, Credentials::Plain { username, secret })
+                    if username.is_empty() && secret.is_empty() =>
+                {
+                    self.write(b"334 VXNlcm5hbWU6\r\n").await?;
+                    return Ok(true);
                 }
                 _ => (),
             }

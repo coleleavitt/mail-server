@@ -207,7 +207,7 @@ impl SpamFilterRules {
                 rules.push(rule);
             }
         }
-        rules.sort_by(|a, b| a.priority.cmp(&b.priority));
+        rules.sort_by_key(|a| a.priority);
 
         let mut result = SpamFilterRules::default();
 

@@ -121,7 +121,7 @@ impl UndeleteApi for Server {
 
                 // Sort ascending by deleted_at
                 let total = deleted.len();
-                deleted.sort_by(|a, b| a.item.deleted_at.cmp(&b.item.deleted_at));
+                deleted.sort_by_key(|a| a.item.deleted_at);
                 let mut results = Vec::with_capacity(if limit > 0 { limit } else { total });
 
                 for blob in deleted {

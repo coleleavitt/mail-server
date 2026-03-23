@@ -313,11 +313,10 @@ impl Request<Command> {
                                     while let Some(token) = tokens.next() {
                                         match token {
                                             Token::ParenthesisClose => break,
-                                            Token::Argument(value) => {
-                                                if value.eq_ignore_ascii_case(b"LAZY") {
+                                            Token::Argument(value)
+                                                if value.eq_ignore_ascii_case(b"LAZY") => {
                                                     is_lazy = true;
                                                 }
-                                            }
                                             _ => (),
                                         }
                                     }

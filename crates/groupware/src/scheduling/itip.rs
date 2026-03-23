@@ -116,28 +116,26 @@ pub(crate) fn itip_export_component(
             (
                 ICalendarProperty::Organizer | ICalendarProperty::Attendee,
                 ItipExportAs::Attendee(attendee_entry_ids),
-            ) => {
-                if attendee_entry_ids.contains(&(entry_id as u16))
-                    || entry.name == ICalendarProperty::Organizer
-                {
-                    comp.entries.push(ICalendarEntry {
-                        name: entry.name.clone(),
-                        params: entry
-                            .params
-                            .iter()
-                            .filter(|param| {
-                                !matches!(
-                                    &param.name,
-                                    ICalendarParameterName::ScheduleStatus
-                                        | ICalendarParameterName::ScheduleAgent
-                                        | ICalendarParameterName::ScheduleForceSend
-                                )
-                            })
-                            .cloned()
-                            .collect(),
-                        values: entry.values.clone(),
-                    });
-                }
+            ) if (attendee_entry_ids.contains(&(entry_id as u16))
+                || entry.name == ICalendarProperty::Organizer) =>
+            {
+                comp.entries.push(ICalendarEntry {
+                    name: entry.name.clone(),
+                    params: entry
+                        .params
+                        .iter()
+                        .filter(|param| {
+                            !matches!(
+                                &param.name,
+                                ICalendarParameterName::ScheduleStatus
+                                    | ICalendarParameterName::ScheduleAgent
+                                    | ICalendarParameterName::ScheduleForceSend
+                            )
+                        })
+                        .cloned()
+                        .collect(),
+                    values: entry.values.clone(),
+                });
             }
             (
                 ICalendarProperty::RequestStatus

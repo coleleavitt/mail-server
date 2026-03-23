@@ -3021,6 +3021,7 @@ dependencies = [
  "rev_lines",
  "rkyv",
  "rsa",
+ "rustls-pki-types",
  "serde",
  "serde_json",
  "services",

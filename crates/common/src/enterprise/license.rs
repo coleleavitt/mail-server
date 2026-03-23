@@ -284,7 +284,7 @@ impl LicenseKey {
 
     #[cfg(feature = "dev_enterprise")]
     pub fn expires_in(&self) -> Duration {
-        Duration::MAX
+        Duration::from_secs(86400 * 365 * 100)
     }
 
     #[cfg(not(feature = "dev_enterprise"))]
@@ -294,7 +294,7 @@ impl LicenseKey {
 
     #[cfg(feature = "dev_enterprise")]
     pub fn renew_in(&self) -> Duration {
-        Duration::MAX
+        Duration::from_secs(86400 * 365 * 100)
     }
 
     #[cfg(not(feature = "dev_enterprise"))]
@@ -375,8 +375,8 @@ mod tests {
         let license = LicenseKey::new("any_key", "example.com").unwrap();
         assert!(!license.is_expired());
         assert!(!license.is_near_expiration());
-        assert_eq!(license.expires_in(), Duration::MAX);
-        assert_eq!(license.renew_in(), Duration::MAX);
+        assert_eq!(license.expires_in(), Duration::from_secs(86400 * 365 * 100));
+        assert_eq!(license.renew_in(), Duration::from_secs(86400 * 365 * 100));
     }
 
     #[test]

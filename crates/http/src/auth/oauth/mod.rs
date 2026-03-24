@@ -9,6 +9,7 @@ use hyper::header::CONTENT_TYPE;
 use serde::{Deserialize, Serialize};
 use utils::map::vec_map::VecMap;
 
+pub mod anthropic;
 pub mod auth;
 pub mod openid;
 pub mod registration;

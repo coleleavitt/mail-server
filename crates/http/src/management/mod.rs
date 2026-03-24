@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
+pub mod ai;
 pub mod crypto;
 pub mod dkim;
 pub mod dns;
@@ -27,6 +28,8 @@ pub mod enterprise;
 use enterprise::telemetry::TelemetryApi;
 // SPDX-SnippetEnd
 
+use ai::AiTestHandler;
+use crate::auth::oauth::anthropic::AnthropicOAuthHandler;
 use crate::auth::oauth::auth::OAuthApiHandler;
 use common::{Server, auth::AccessToken};
 use crypto::CryptoHandler;
@@ -131,12 +134,20 @@ impl ManagementApi for Server {
 
                 Err(manage::unsupported("Restart is not yet supported"))
             }
-            "oauth" => {
-                // Validate the access token
-                access_token.assert_has_permission(Permission::AuthenticateOauth)?;
-
-                self.handle_oauth_api_request(access_token, body).await
+            "ai" => {
+                access_token.assert_has_permission(Permission::SettingsList)?;
+                self.handle_ai_test(req, path, body).await
             }
+            "oauth" => match path.get(1).copied().unwrap_or_default() {
+                "anthropic" => {
+                    self.handle_anthropic_oauth(req, path, access_token, body)
+                        .await
+                }
+                _ => {
+                    access_token.assert_has_permission(Permission::AuthenticateOauth)?;
+                    self.handle_oauth_api_request(access_token, body).await
+                }
+            },
             "account" => match (path.get(1).copied().unwrap_or_default(), req.method()) {
                 ("crypto", &Method::POST) => {
                     // Validate the access token

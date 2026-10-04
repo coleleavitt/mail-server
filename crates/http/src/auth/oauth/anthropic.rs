@@ -4,40 +4,44 @@
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
-use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
-use common::{Server, auth::AccessToken};
+use std::future::Future;
+use std::sync::Arc;
+
+use base64::Engine;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use common::Server;
+use common::auth::AccessToken;
+pub use common::enterprise::anthropic::ClaudeTokens;
+use common::enterprise::anthropic::{
+    CLAUDE_CLIENT_ID,
+    CLAUDE_HOSTED_CALLBACK_URI,
+    DEFAULT_SCOPES,
+    KV_ANTHROPIC_PKCE,
+    exchange_code,
+};
+#[cfg(test)]
+use common::enterprise::anthropic::{CLAUDE_TOKEN_URL, TokenResponse};
 use directory::Permission;
 use http_proto::*;
 use hyper::Method;
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::{future::Future, sync::Arc, time::Duration};
-use store::{
-    Serialize as StoreSerialize,
-    dispatch::lookup::KeyValue,
-    write::{AlignedBytes, Archive, Archiver},
-};
+use store::Serialize as StoreSerialize;
+use store::dispatch::lookup::KeyValue;
+use store::write::{AlignedBytes, Archive, Archiver};
 use trc::AddContext;
 
-const CLAUDE_CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
 const CLAUDE_AUTH_URL: &str = "https://claude.ai/oauth/authorize";
-const CLAUDE_TOKEN_URL: &str = "https://platform.claude.com/v1/oauth/token";
-const CLAUDE_HOSTED_CALLBACK_URI: &str = "https://platform.claude.com/oauth/code/callback";
 
-const DEFAULT_SCOPES: &[&str] = &[
-    "user:profile",
-    "user:inference",
-    "user:sessions:claude_code",
-    "user:mcp_servers",
-];
-
-const USER_AGENT: &str = "stalwart-mail/1.0.0 (external, cli)";
-const VERIFIER_RANDOM_BYTES: usize = 32;
+const RANDOM_BYTES: usize = 32;
 const PKCE_STATE_EXPIRY_SECS: u64 = 600;
 
-const KV_ANTHROPIC_PKCE: u8 = 0x70;
-const KV_ANTHROPIC_TOKENS: u8 = 0x71;
+fn random_token() -> String {
+    let mut random_bytes = [0u8; RANDOM_BYTES];
+    rand::rng().fill_bytes(&mut random_bytes);
+    URL_SAFE_NO_PAD.encode(random_bytes)
+}
 
 #[derive(Debug, Clone)]
 pub struct PkceChallenge {
@@ -47,15 +51,12 @@ pub struct PkceChallenge {
 
 impl PkceChallenge {
     pub fn generate() -> Self {
-        let verifier = Self::generate_verifier();
+        let verifier = random_token();
         let challenge = Self::compute_challenge(&verifier);
-        Self { verifier, challenge }
-    }
-
-    fn generate_verifier() -> String {
-        let mut random_bytes = [0u8; VERIFIER_RANDOM_BYTES];
-        rand::rng().fill_bytes(&mut random_bytes);
-        URL_SAFE_NO_PAD.encode(random_bytes)
+        Self {
+            verifier,
+            challenge,
+        }
     }
 
     fn compute_challenge(verifier: &str) -> String {
@@ -68,44 +69,14 @@ impl PkceChallenge {
     }
 }
 
+/// Server-side record of a pending login, keyed by the OAuth `state`. The
+/// verifier never leaves the server.
 #[derive(
     Debug, rkyv::Serialize, rkyv::Deserialize, rkyv::Archive, Clone, Serialize, Deserialize,
 )]
 pub struct PkceState {
     pub verifier: String,
     pub account_id: u32,
-}
-
-#[derive(
-    Debug, Clone, Serialize, Deserialize, rkyv::Serialize, rkyv::Deserialize, rkyv::Archive,
-)]
-pub struct ClaudeTokens {
-    pub access_token: String,
-    pub refresh_token: Option<String>,
-    pub expires_at: u64,
-    pub scopes: Vec<String>,
-    pub account_email: Option<String>,
-    pub organization_name: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct TokenResponse {
-    access_token: String,
-    refresh_token: Option<String>,
-    expires_in: Option<u64>,
-    scope: Option<String>,
-    account: Option<AccountInfo>,
-    organization: Option<OrganizationInfo>,
-}
-
-#[derive(Debug, Deserialize)]
-struct AccountInfo {
-    email_address: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct OrganizationInfo {
-    name: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -151,20 +122,11 @@ pub trait AnthropicOAuthHandler: Sync + Send {
         body: Option<Vec<u8>>,
     ) -> impl Future<Output = trc::Result<HttpResponse>> + Send;
 
-    fn handle_anthropic_refresh(
-        &self,
-        access_token: Arc<AccessToken>,
-    ) -> impl Future<Output = trc::Result<HttpResponse>> + Send;
+    fn handle_anthropic_refresh(&self) -> impl Future<Output = trc::Result<HttpResponse>> + Send;
 
-    fn handle_anthropic_status(
-        &self,
-        access_token: Arc<AccessToken>,
-    ) -> impl Future<Output = trc::Result<HttpResponse>> + Send;
+    fn handle_anthropic_status(&self) -> impl Future<Output = trc::Result<HttpResponse>> + Send;
 
-    fn handle_anthropic_logout(
-        &self,
-        access_token: Arc<AccessToken>,
-    ) -> impl Future<Output = trc::Result<HttpResponse>> + Send;
+    fn handle_anthropic_logout(&self) -> impl Future<Output = trc::Result<HttpResponse>> + Send;
 
     fn handle_anthropic_oauth(
         &self,
@@ -173,8 +135,6 @@ pub trait AnthropicOAuthHandler: Sync + Send {
         access_token: Arc<AccessToken>,
         body: Option<Vec<u8>>,
     ) -> impl Future<Output = trc::Result<HttpResponse>> + Send;
-
-    fn get_anthropic_tokens(&self) -> impl Future<Output = trc::Result<Option<ClaudeTokens>>> + Send;
 }
 
 impl AnthropicOAuthHandler for Server {
@@ -189,12 +149,10 @@ impl AnthropicOAuthHandler for Server {
 
         match (path.get(2).copied().unwrap_or_default(), req.method()) {
             ("login", &Method::GET) => self.handle_anthropic_login(access_token).await,
-            ("exchange", &Method::POST) => {
-                self.handle_anthropic_exchange(access_token, body).await
-            }
-            ("refresh", &Method::POST) => self.handle_anthropic_refresh(access_token).await,
-            ("status", &Method::GET) => self.handle_anthropic_status(access_token).await,
-            ("logout", &Method::DELETE) => self.handle_anthropic_logout(access_token).await,
+            ("exchange", &Method::POST) => self.handle_anthropic_exchange(access_token, body).await,
+            ("refresh", &Method::POST) => self.handle_anthropic_refresh().await,
+            ("status", &Method::GET) => self.handle_anthropic_status().await,
+            ("logout", &Method::DELETE) => self.handle_anthropic_logout().await,
             _ => Err(trc::ResourceEvent::NotFound.into_err()),
         }
     }
@@ -204,50 +162,60 @@ impl AnthropicOAuthHandler for Server {
         access_token: Arc<AccessToken>,
     ) -> trc::Result<HttpResponse> {
         let pkce = PkceChallenge::generate();
+        let state = random_token();
+        let scopes = DEFAULT_SCOPES.join(" ");
 
         let params = [
             ("code", "true"),
             ("client_id", CLAUDE_CLIENT_ID),
             ("response_type", "code"),
             ("redirect_uri", CLAUDE_HOSTED_CALLBACK_URI),
-            ("scope", &DEFAULT_SCOPES.join(" ")),
+            ("scope", &scopes),
             ("code_challenge", &pkce.challenge),
             ("code_challenge_method", PkceChallenge::challenge_method()),
-            ("state", &pkce.verifier),
+            ("state", &state),
         ];
 
         let auth_url = format!(
             "{}?{}",
             CLAUDE_AUTH_URL,
-            serde_urlencoded::to_string(&params).unwrap_or_default()
+            serde_urlencoded::to_string(params).map_err(|err| {
+                trc::EventType::Server(trc::ServerEvent::ThreadError)
+                    .into_err()
+                    .reason(err)
+                    .caused_by(trc::location!())
+            })?
         );
 
-        let state = PkceState {
-            verifier: pkce.verifier.clone(),
+        let pending = PkceState {
+            verifier: pkce.verifier,
             account_id: access_token.primary_id(),
         };
 
-        let state_bytes = Archiver::new(state).untrusted().serialize().caused_by(trc::location!())?;
+        let pending_bytes = Archiver::new(pending)
+            .untrusted()
+            .serialize()
+            .caused_by(trc::location!())?;
 
         self.core
             .storage
             .lookup
             .key_set(
-                KeyValue::with_prefix(KV_ANTHROPIC_PKCE, pkce.verifier.as_bytes(), state_bytes)
+                KeyValue::with_prefix(KV_ANTHROPIC_PKCE, state.as_bytes(), pending_bytes)
                     .expires(PKCE_STATE_EXPIRY_SECS),
             )
             .await?;
 
         Ok(JsonResponse::new(LoginResponse {
             url: auth_url,
-            state: pkce.verifier,
+            state,
         })
         .into_http_response())
     }
 
     async fn handle_anthropic_exchange(
         &self,
-        _access_token: Arc<AccessToken>,
+        access_token: Arc<AccessToken>,
         body: Option<Vec<u8>>,
     ) -> trc::Result<HttpResponse> {
         let body = body.ok_or_else(|| {
@@ -262,58 +230,47 @@ impl AnthropicOAuthHandler for Server {
                 .details(format!("Invalid JSON: {}", err))
         })?;
 
-        let state_archive = self
+        // The hosted callback page displays `code#state`; accept it pasted whole.
+        let code = request
+            .code
+            .split_once('#')
+            .map_or(request.code.as_str(), |(code, _)| code);
+
+        let key = KeyValue::<()>::build_key(KV_ANTHROPIC_PKCE, request.state.as_bytes());
+        let pending = self
             .core
             .storage
             .lookup
-            .key_get::<Archive<AlignedBytes>>(KeyValue::<()>::build_key(
-                KV_ANTHROPIC_PKCE,
-                request.state.as_bytes(),
-            ))
+            .key_get::<Archive<AlignedBytes>>(key.clone())
             .await?
             .ok_or_else(|| {
                 trc::AuthEvent::Failed
                     .into_err()
                     .details("Invalid or expired state. Please restart the login flow.")
-            })?;
-
-        let pkce_state = state_archive
-            .unarchive::<PkceState>()
+            })?
+            .deserialize::<PkceState>()
             .caused_by(trc::location!())?;
 
-        self.core
-            .storage
-            .lookup
-            .key_delete(KeyValue::<()>::build_key(
-                KV_ANTHROPIC_PKCE,
-                request.state.as_bytes(),
-            ))
-            .await?;
+        if pending.account_id != access_token.primary_id() {
+            return Err(trc::AuthEvent::Failed
+                .into_err()
+                .details("Login was started by a different account"));
+        }
 
-        let tokens = exchange_anthropic_code(&request.code, &pkce_state.verifier, &request.state)
+        // Single use, whether or not the exchange succeeds.
+        self.core.storage.lookup.key_delete(key).await?;
+
+        let tokens = exchange_code(code, &pending.verifier, &request.state)
             .await
             .map_err(|err| {
                 trc::AuthEvent::Error
                     .into_err()
-                    .details(format!("Token exchange failed: {}", err))
+                    .details("Anthropic token exchange failed")
+                    .reason(err)
             })?;
 
         let account_email = tokens.account_email.clone();
-
-        let tokens_bytes = Archiver::new(tokens)
-            .untrusted()
-            .serialize()
-            .caused_by(trc::location!())?;
-
-        self.core
-            .storage
-            .lookup
-            .key_set(KeyValue::with_prefix(
-                KV_ANTHROPIC_TOKENS,
-                b"global",
-                tokens_bytes,
-            ))
-            .await?;
+        self.store_anthropic_tokens(tokens).await?;
 
         Ok(JsonResponse::new(ExchangeResponse {
             success: true,
@@ -323,71 +280,25 @@ impl AnthropicOAuthHandler for Server {
         .into_http_response())
     }
 
-    async fn handle_anthropic_refresh(
-        &self,
-        _access_token: Arc<AccessToken>,
-    ) -> trc::Result<HttpResponse> {
-        let current_tokens = self.get_anthropic_tokens().await?.ok_or_else(|| {
-            trc::AuthEvent::Failed
-                .into_err()
-                .details("No tokens stored. Please authenticate first.")
-        })?;
-
-        let refresh_token = current_tokens.refresh_token.as_ref().ok_or_else(|| {
-            trc::AuthEvent::Failed
-                .into_err()
-                .details("No refresh token available")
-        })?;
-
-        let new_tokens = refresh_anthropic_tokens(refresh_token).await.map_err(|err| {
-            trc::AuthEvent::Error
-                .into_err()
-                .details(format!("Token refresh failed: {}", err))
-        })?;
-
-        let account_email = new_tokens.account_email.clone();
-
-        let tokens_bytes = Archiver::new(new_tokens)
-            .untrusted()
-            .serialize()
-            .caused_by(trc::location!())?;
-
-        self.core
-            .storage
-            .lookup
-            .key_set(KeyValue::with_prefix(
-                KV_ANTHROPIC_TOKENS,
-                b"global",
-                tokens_bytes,
-            ))
-            .await?;
+    async fn handle_anthropic_refresh(&self) -> trc::Result<HttpResponse> {
+        let tokens = self.refresh_anthropic_tokens().await?;
 
         Ok(JsonResponse::new(ExchangeResponse {
             success: true,
             message: "Tokens refreshed successfully".to_string(),
-            account_email,
+            account_email: tokens.account_email,
         })
         .into_http_response())
     }
 
-    async fn handle_anthropic_status(
-        &self,
-        _access_token: Arc<AccessToken>,
-    ) -> trc::Result<HttpResponse> {
-        let response = match self.get_anthropic_tokens().await? {
-            Some(tokens) => {
-                let now = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs();
-
-                TokenStatusResponse {
-                    authenticated: tokens.expires_at > now,
-                    account_email: tokens.account_email,
-                    organization: tokens.organization_name,
-                    expires_at: Some(tokens.expires_at),
-                }
-            }
+    async fn handle_anthropic_status(&self) -> trc::Result<HttpResponse> {
+        let response = match self.anthropic_tokens().await? {
+            Some(tokens) => TokenStatusResponse {
+                authenticated: tokens.expires_at > common::enterprise::anthropic::now(),
+                account_email: tokens.account_email,
+                organization: tokens.organization_name,
+                expires_at: Some(tokens.expires_at),
+            },
             None => TokenStatusResponse {
                 authenticated: false,
                 account_email: None,
@@ -399,15 +310,8 @@ impl AnthropicOAuthHandler for Server {
         Ok(JsonResponse::new(response).into_http_response())
     }
 
-    async fn handle_anthropic_logout(
-        &self,
-        _access_token: Arc<AccessToken>,
-    ) -> trc::Result<HttpResponse> {
-        self.core
-            .storage
-            .lookup
-            .key_delete(KeyValue::<()>::build_key(KV_ANTHROPIC_TOKENS, b"global"))
-            .await?;
+    async fn handle_anthropic_logout(&self) -> trc::Result<HttpResponse> {
+        self.delete_anthropic_tokens().await?;
 
         Ok(JsonResponse::new(ExchangeResponse {
             success: true,
@@ -416,145 +320,6 @@ impl AnthropicOAuthHandler for Server {
         })
         .into_http_response())
     }
-
-    async fn get_anthropic_tokens(&self) -> trc::Result<Option<ClaudeTokens>> {
-        match self
-            .core
-            .storage
-            .lookup
-            .key_get::<Archive<AlignedBytes>>(KeyValue::<()>::build_key(
-                KV_ANTHROPIC_TOKENS,
-                b"global",
-            ))
-            .await?
-        {
-            Some(archive) => {
-                let tokens = archive
-                    .deserialize::<ClaudeTokens>()
-                    .caused_by(trc::location!())?;
-                Ok(Some(tokens))
-            }
-            None => Ok(None),
-        }
-    }
-}
-
-async fn exchange_anthropic_code(
-    code: &str,
-    code_verifier: &str,
-    state: &str,
-) -> Result<ClaudeTokens, String> {
-    let body = serde_json::json!({
-        "code": code,
-        "state": state,
-        "grant_type": "authorization_code",
-        "client_id": CLAUDE_CLIENT_ID,
-        "redirect_uri": CLAUDE_HOSTED_CALLBACK_URI,
-        "code_verifier": code_verifier,
-    });
-
-    let response = reqwest::Client::builder()
-        .timeout(Duration::from_secs(30))
-        .build()
-        .map_err(|err| format!("Failed to create HTTP client: {}", err))?
-        .post(CLAUDE_TOKEN_URL)
-        .header("Content-Type", "application/json")
-        .header("User-Agent", USER_AGENT)
-        .json(&body)
-        .send()
-        .await
-        .map_err(|err| format!("Token request failed: {}", err))?;
-
-    if !response.status().is_success() {
-        let status = response.status();
-        let body = response.text().await.unwrap_or_default();
-        return Err(format!(
-            "Token endpoint returned {}: {}",
-            status.as_u16(),
-            body
-        ));
-    }
-
-    let token_response: TokenResponse = response
-        .json()
-        .await
-        .map_err(|err| format!("Failed to parse token response: {}", err))?;
-
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-
-    let expires_in = token_response.expires_in.unwrap_or(28800);
-    let scopes = token_response
-        .scope
-        .map(|s| s.split_whitespace().map(String::from).collect())
-        .unwrap_or_default();
-
-    Ok(ClaudeTokens {
-        access_token: token_response.access_token,
-        refresh_token: token_response.refresh_token,
-        expires_at: now + expires_in,
-        scopes,
-        account_email: token_response.account.and_then(|a| a.email_address),
-        organization_name: token_response.organization.and_then(|o| o.name),
-    })
-}
-
-async fn refresh_anthropic_tokens(refresh_token: &str) -> Result<ClaudeTokens, String> {
-    let body = serde_json::json!({
-        "grant_type": "refresh_token",
-        "refresh_token": refresh_token,
-        "client_id": CLAUDE_CLIENT_ID,
-        "scope": DEFAULT_SCOPES.join(" "),
-    });
-
-    let response = reqwest::Client::builder()
-        .timeout(Duration::from_secs(30))
-        .build()
-        .map_err(|err| format!("Failed to create HTTP client: {}", err))?
-        .post(CLAUDE_TOKEN_URL)
-        .header("Content-Type", "application/json")
-        .header("User-Agent", USER_AGENT)
-        .json(&body)
-        .send()
-        .await
-        .map_err(|err| format!("Refresh request failed: {}", err))?;
-
-    if !response.status().is_success() {
-        let status = response.status();
-        let body = response.text().await.unwrap_or_default();
-        return Err(format!(
-            "Token refresh returned {}: {}",
-            status.as_u16(),
-            body
-        ));
-    }
-
-    let token_response: TokenResponse = response
-        .json()
-        .await
-        .map_err(|err| format!("Failed to parse refresh response: {}", err))?;
-
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-
-    let expires_in = token_response.expires_in.unwrap_or(28800);
-    let scopes = token_response
-        .scope
-        .map(|s| s.split_whitespace().map(String::from).collect())
-        .unwrap_or_default();
-
-    Ok(ClaudeTokens {
-        access_token: token_response.access_token,
-        refresh_token: token_response.refresh_token,
-        expires_at: now + expires_in,
-        scopes,
-        account_email: token_response.account.and_then(|a| a.email_address),
-        organization_name: token_response.organization.and_then(|o| o.name),
-    })
 }
 
 #[cfg(test)]
@@ -569,45 +334,66 @@ mod tests {
     fn test_pkce_verifier_length() {
         let pkce = PkceChallenge::generate();
         // Base64 encoding of 32 bytes = 43 characters (URL_SAFE_NO_PAD)
-        assert_eq!(pkce.verifier.len(), 43, "PKCE verifier should be 43 chars (base64 of 32 bytes)");
+        assert_eq!(
+            pkce.verifier.len(),
+            43,
+            "PKCE verifier should be 43 chars (base64 of 32 bytes)"
+        );
     }
 
     #[test]
     fn test_pkce_challenge_is_sha256_of_verifier() {
         let pkce = PkceChallenge::generate();
-        
+
         // Manually compute the challenge from verifier
         let expected_challenge = {
             let digest = Sha256::digest(pkce.verifier.as_bytes());
             URL_SAFE_NO_PAD.encode(digest)
         };
-        
-        assert_eq!(pkce.challenge, expected_challenge, "Challenge should be SHA256 of verifier");
+
+        assert_eq!(
+            pkce.challenge, expected_challenge,
+            "Challenge should be SHA256 of verifier"
+        );
     }
 
     #[test]
     fn test_pkce_uniqueness() {
         let pkce1 = PkceChallenge::generate();
         let pkce2 = PkceChallenge::generate();
-        
-        assert_ne!(pkce1.verifier, pkce2.verifier, "Each PKCE should have unique verifier");
-        assert_ne!(pkce1.challenge, pkce2.challenge, "Each PKCE should have unique challenge");
+
+        assert_ne!(
+            pkce1.verifier, pkce2.verifier,
+            "Each PKCE should have unique verifier"
+        );
+        assert_ne!(
+            pkce1.challenge, pkce2.challenge,
+            "Each PKCE should have unique challenge"
+        );
     }
 
     #[test]
     fn test_pkce_challenge_method() {
-        assert_eq!(PkceChallenge::challenge_method(), "S256", "Challenge method should be S256");
+        assert_eq!(
+            PkceChallenge::challenge_method(),
+            "S256",
+            "Challenge method should be S256"
+        );
     }
 
     #[test]
     fn test_pkce_verifier_is_url_safe() {
         let pkce = PkceChallenge::generate();
-        
+
         // URL-safe base64 should only contain these characters
         let valid_chars: &str = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
-        
+
         for c in pkce.verifier.chars() {
-            assert!(valid_chars.contains(c), "Verifier should be URL-safe base64, found '{}'", c);
+            assert!(
+                valid_chars.contains(c),
+                "Verifier should be URL-safe base64, found '{}'",
+                c
+            );
         }
     }
 
@@ -618,7 +404,7 @@ mod tests {
     #[test]
     fn test_auth_url_format() {
         let pkce = PkceChallenge::generate();
-        
+
         let params = [
             ("code", "true"),
             ("client_id", CLAUDE_CLIENT_ID),
@@ -637,31 +423,61 @@ mod tests {
         );
 
         // Verify URL starts with correct base
-        assert!(auth_url.starts_with("https://claude.ai/oauth/authorize?"), 
-            "Auth URL should use claude.ai, got: {}", auth_url);
-        
+        assert!(
+            auth_url.starts_with("https://claude.ai/oauth/authorize?"),
+            "Auth URL should use claude.ai, got: {}",
+            auth_url
+        );
+
         // Verify required params are present
-        assert!(auth_url.contains("client_id="), "URL should contain client_id");
-        assert!(auth_url.contains("response_type=code"), "URL should contain response_type=code");
-        assert!(auth_url.contains("code_challenge="), "URL should contain code_challenge");
-        assert!(auth_url.contains("code_challenge_method=S256"), "URL should contain S256 method");
-        assert!(auth_url.contains("redirect_uri="), "URL should contain redirect_uri");
+        assert!(
+            auth_url.contains("client_id="),
+            "URL should contain client_id"
+        );
+        assert!(
+            auth_url.contains("response_type=code"),
+            "URL should contain response_type=code"
+        );
+        assert!(
+            auth_url.contains("code_challenge="),
+            "URL should contain code_challenge"
+        );
+        assert!(
+            auth_url.contains("code_challenge_method=S256"),
+            "URL should contain S256 method"
+        );
+        assert!(
+            auth_url.contains("redirect_uri="),
+            "URL should contain redirect_uri"
+        );
     }
 
     #[test]
     fn test_claude_constants() {
         assert_eq!(CLAUDE_CLIENT_ID, "9d1c250a-e61b-44d9-88ed-5944d1962f5e");
         assert_eq!(CLAUDE_AUTH_URL, "https://claude.ai/oauth/authorize");
-        assert_eq!(CLAUDE_TOKEN_URL, "https://platform.claude.com/v1/oauth/token");
-        assert_eq!(CLAUDE_HOSTED_CALLBACK_URI, "https://platform.claude.com/oauth/code/callback");
+        assert_eq!(
+            CLAUDE_TOKEN_URL,
+            "https://platform.claude.com/v1/oauth/token"
+        );
+        assert_eq!(
+            CLAUDE_HOSTED_CALLBACK_URI,
+            "https://platform.claude.com/oauth/code/callback"
+        );
     }
 
     #[test]
     fn test_default_scopes() {
         let scopes = DEFAULT_SCOPES;
-        
-        assert!(scopes.contains(&"user:profile"), "Should include user:profile scope");
-        assert!(scopes.contains(&"user:inference"), "Should include user:inference scope");
+
+        assert!(
+            scopes.contains(&"user:profile"),
+            "Should include user:profile scope"
+        );
+        assert!(
+            scopes.contains(&"user:inference"),
+            "Should include user:inference scope"
+        );
         assert!(scopes.len() >= 2, "Should have at least 2 scopes");
     }
 
@@ -682,8 +498,9 @@ mod tests {
 
         // Test JSON roundtrip
         let json = serde_json::to_string(&tokens).expect("Should serialize to JSON");
-        let parsed: ClaudeTokens = serde_json::from_str(&json).expect("Should deserialize from JSON");
-        
+        let parsed: ClaudeTokens =
+            serde_json::from_str(&json).expect("Should deserialize from JSON");
+
         assert_eq!(parsed.access_token, tokens.access_token);
         assert_eq!(parsed.refresh_token, tokens.refresh_token);
         assert_eq!(parsed.expires_at, tokens.expires_at);
@@ -704,8 +521,9 @@ mod tests {
         };
 
         let json = serde_json::to_string(&tokens).expect("Should serialize minimal tokens");
-        let parsed: ClaudeTokens = serde_json::from_str(&json).expect("Should deserialize minimal tokens");
-        
+        let parsed: ClaudeTokens =
+            serde_json::from_str(&json).expect("Should deserialize minimal tokens");
+
         assert!(parsed.refresh_token.is_none());
         assert!(parsed.account_email.is_none());
         assert!(parsed.organization_name.is_none());
@@ -716,9 +534,15 @@ mod tests {
         // OAuth tokens start with sk-ant-oat
         let oauth_token = "sk-ant-oat-abcd1234-xyz";
         let api_key = "sk-ant-api01-abcd1234-xyz";
-        
-        assert!(oauth_token.starts_with("sk-ant-oat"), "OAuth token should start with sk-ant-oat");
-        assert!(!api_key.starts_with("sk-ant-oat"), "API key should NOT start with sk-ant-oat");
+
+        assert!(
+            oauth_token.starts_with("sk-ant-oat"),
+            "OAuth token should start with sk-ant-oat"
+        );
+        assert!(
+            !api_key.starts_with("sk-ant-oat"),
+            "API key should NOT start with sk-ant-oat"
+        );
     }
 
     // =============================================================================
@@ -728,8 +552,9 @@ mod tests {
     #[test]
     fn test_exchange_request_deserialization() {
         let json = r#"{"code": "auth-code-123", "state": "verifier-state-xyz"}"#;
-        let request: ExchangeRequest = serde_json::from_str(json).expect("Should parse ExchangeRequest");
-        
+        let request: ExchangeRequest =
+            serde_json::from_str(json).expect("Should parse ExchangeRequest");
+
         assert_eq!(request.code, "auth-code-123");
         assert_eq!(request.state, "verifier-state-xyz");
     }
@@ -742,7 +567,7 @@ mod tests {
         };
 
         let json = serde_json::to_string(&response).expect("Should serialize LoginResponse");
-        
+
         assert!(json.contains("\"url\":"));
         assert!(json.contains("\"state\":"));
         assert!(json.contains("test-state-123"));
@@ -773,7 +598,10 @@ mod tests {
         let json = serde_json::to_string(&unauth_response).expect("Should serialize");
         assert!(json.contains("\"authenticated\":false"));
         // With skip_serializing_if, None fields should not appear
-        assert!(!json.contains("account_email"), "None fields should be skipped");
+        assert!(
+            !json.contains("account_email"),
+            "None fields should be skipped"
+        );
     }
 
     // =============================================================================
@@ -806,12 +634,16 @@ mod tests {
             "organization": {"name": "Test Org"}
         }"#;
 
-        let response: TokenResponse = serde_json::from_str(json).expect("Should parse full response");
-        
+        let response: TokenResponse =
+            serde_json::from_str(json).expect("Should parse full response");
+
         assert_eq!(response.access_token, "sk-ant-oat-test");
         assert_eq!(response.refresh_token, Some("refresh-123".to_string()));
         assert_eq!(response.expires_in, Some(3600));
-        assert_eq!(response.scope, Some("user:profile user:inference".to_string()));
+        assert_eq!(
+            response.scope,
+            Some("user:profile user:inference".to_string())
+        );
         assert!(response.account.is_some());
         assert!(response.organization.is_some());
     }
@@ -820,8 +652,9 @@ mod tests {
     fn test_token_response_parsing_minimal() {
         let json = r#"{"access_token": "sk-ant-oat-minimal"}"#;
 
-        let response: TokenResponse = serde_json::from_str(json).expect("Should parse minimal response");
-        
+        let response: TokenResponse =
+            serde_json::from_str(json).expect("Should parse minimal response");
+
         assert_eq!(response.access_token, "sk-ant-oat-minimal");
         assert!(response.refresh_token.is_none());
         assert!(response.expires_in.is_none());
@@ -838,7 +671,7 @@ mod tests {
     fn test_scope_string_parsing() {
         let scope_str = "user:profile user:inference user:sessions:claude_code";
         let scopes: Vec<String> = scope_str.split_whitespace().map(String::from).collect();
-        
+
         assert_eq!(scopes.len(), 3);
         assert!(scopes.contains(&"user:profile".to_string()));
         assert!(scopes.contains(&"user:inference".to_string()));
@@ -850,10 +683,10 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_secs();
-        
+
         let expires_in: u64 = 3600; // 1 hour
         let expires_at = now + expires_in;
-        
+
         // Should be in the future
         assert!(expires_at > now);
         // Should be approximately 1 hour from now
@@ -876,7 +709,10 @@ mod tests {
             account_email: None,
             organization_name: None,
         };
-        assert!(future_token.expires_at > now, "Future token should not be expired");
+        assert!(
+            future_token.expires_at > now,
+            "Future token should not be expired"
+        );
 
         // Token that expired in the past
         let past_token = ClaudeTokens {
@@ -931,7 +767,10 @@ mod tests {
             .expect("Should serialize ClaudeTokens with rkyv");
 
         assert!(!bytes.is_empty(), "Serialized bytes should not be empty");
-        assert!(bytes.len() > 50, "Serialized bytes should have substantial content");
+        assert!(
+            bytes.len() > 50,
+            "Serialized bytes should have substantial content"
+        );
     }
 
     #[test]

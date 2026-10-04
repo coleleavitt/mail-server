@@ -8,10 +8,13 @@
  *
  */
 
-use hyper::{HeaderMap, header::CONTENT_TYPE};
-use serde::{Deserialize, Serialize};
 use std::time::Duration;
-use utils::config::{Config, http::parse_http_headers};
+
+use hyper::HeaderMap;
+use hyper::header::CONTENT_TYPE;
+use serde::{Deserialize, Serialize};
+use utils::config::Config;
+use utils::config::http::parse_http_headers;
 
 #[derive(Clone, Debug)]
 pub struct AiApiConfig {
@@ -127,7 +130,8 @@ impl AiApiConfig {
         prompt: impl Into<String>,
         temperature: Option<f64>,
     ) -> trc::Result<String> {
-        self.send_request_with_token(prompt, temperature, None).await
+        self.send_request_with_token(prompt, temperature, None)
+            .await
     }
 
     pub async fn send_request_with_token(
@@ -182,10 +186,10 @@ impl AiApiConfig {
 
         let mut headers = self.headers.clone();
         if let ApiType::Anthropic = &self.api_type {
-            let token = oauth_token.or(self.api_key.as_deref());
-            if let Some(api_key) = token {
-                self.add_anthropic_auth_headers(&mut headers, api_key);
-            }
+            let api_key = oauth_token.or(self.api_key.as_deref()).ok_or_else(|| {
+                "No Anthropic credentials available: log in with OAuth or set api-key".to_string()
+            })?;
+            Self::add_anthropic_auth_headers(&mut headers, api_key)?;
         }
 
         // Send request
@@ -252,8 +256,8 @@ impl AiApiConfig {
                         })
                 }
                 ApiType::Anthropic => {
-                    let response = serde_json::from_slice::<AnthropicResponse>(&bytes)
-                        .map_err(|err| {
+                    let response =
+                        serde_json::from_slice::<AnthropicResponse>(&bytes).map_err(|err| {
                             format!(
                                 "Failed to parse Anthropic response from {}: {}",
                                 self.url, err
@@ -289,33 +293,32 @@ impl AiApiConfig {
         }
     }
 
-    fn add_anthropic_auth_headers(&self, headers: &mut HeaderMap, api_key: &str) {
-        use hyper::header::HeaderName;
-        use hyper::header::HeaderValue;
+    fn add_anthropic_auth_headers(headers: &mut HeaderMap, api_key: &str) -> Result<(), String> {
+        use hyper::header::{HeaderName, HeaderValue};
 
         const OAUTH_TOKEN_PREFIX: &str = "sk-ant-oat";
         const ANTHROPIC_VERSION: &str = "2023-06-01";
         const OAUTH_BETA_HEADER: &str = "oauth-2025-04-20";
 
+        let invalid = |_| "Anthropic credential contains invalid header characters".to_string();
         if api_key.starts_with(OAUTH_TOKEN_PREFIX) {
-            headers.insert(
-                hyper::header::AUTHORIZATION,
-                HeaderValue::from_str(&format!("Bearer {}", api_key)).unwrap(),
-            );
+            let mut value = HeaderValue::from_str(&format!("Bearer {api_key}")).map_err(invalid)?;
+            value.set_sensitive(true);
+            headers.insert(hyper::header::AUTHORIZATION, value);
             headers.insert(
                 HeaderName::from_static("anthropic-beta"),
                 HeaderValue::from_static(OAUTH_BETA_HEADER),
             );
         } else {
-            headers.insert(
-                HeaderName::from_static("x-api-key"),
-                HeaderValue::from_str(api_key).unwrap(),
-            );
+            let mut value = HeaderValue::from_str(api_key).map_err(invalid)?;
+            value.set_sensitive(true);
+            headers.insert(HeaderName::from_static("x-api-key"), value);
         }
         headers.insert(
             HeaderName::from_static("anthropic-version"),
             HeaderValue::from_static(ANTHROPIC_VERSION),
         );
+        Ok(())
     }
 
     pub fn parse(config: &mut Config, id: &str) -> Option<Self> {
@@ -415,8 +418,8 @@ mod tests {
             "stop_reason": "end_turn"
         }"#;
 
-        let response: AnthropicResponse = serde_json::from_str(response_json)
-            .expect("Should parse Anthropic response");
+        let response: AnthropicResponse =
+            serde_json::from_str(response_json).expect("Should parse Anthropic response");
 
         assert_eq!(response.id, "msg_123");
         assert_eq!(response.role, "assistant");
@@ -453,19 +456,15 @@ mod tests {
             AnthropicContentBlock::Text { text } if !text.is_empty() => Some(text),
             _ => None,
         });
-        assert_eq!(
-            text,
-            Some("HAM|HIGH|Normal business email".to_string())
-        );
+        assert_eq!(text, Some("HAM|HIGH|Normal business email".to_string()));
     }
 
     #[test]
     fn test_anthropic_oauth_headers() {
-        let config = create_test_config(ApiType::Anthropic);
         let mut headers = HeaderMap::new();
 
         let oauth_token = "sk-ant-oat-abcdef123456-xyz";
-        config.add_anthropic_auth_headers(&mut headers, oauth_token);
+        AiApiConfig::add_anthropic_auth_headers(&mut headers, oauth_token).unwrap();
 
         assert!(headers.contains_key("authorization"));
         assert!(headers.contains_key("anthropic-version"));
@@ -483,11 +482,10 @@ mod tests {
 
     #[test]
     fn test_anthropic_api_key_headers() {
-        let config = create_test_config(ApiType::Anthropic);
         let mut headers = HeaderMap::new();
 
         let api_key = "sk-ant-api01-regular-api-key";
-        config.add_anthropic_auth_headers(&mut headers, api_key);
+        AiApiConfig::add_anthropic_auth_headers(&mut headers, api_key).unwrap();
 
         assert!(
             headers.contains_key("x-api-key"),
@@ -505,17 +503,36 @@ mod tests {
 
     #[test]
     fn test_anthropic_version_header_always_set() {
-        let config = create_test_config(ApiType::Anthropic);
-
         for token in ["sk-ant-oat-oauth-token", "sk-ant-api01-key", "plain-key"] {
             let mut headers = HeaderMap::new();
-            config.add_anthropic_auth_headers(&mut headers, token);
+            AiApiConfig::add_anthropic_auth_headers(&mut headers, token).unwrap();
             assert_eq!(
                 headers.get("anthropic-version").unwrap().to_str().unwrap(),
                 "2023-06-01",
                 "anthropic-version must always be set for token: {token}"
             );
         }
+    }
+
+    #[test]
+    fn test_anthropic_headers_reject_control_characters() {
+        let mut headers = HeaderMap::new();
+        assert!(
+            AiApiConfig::add_anthropic_auth_headers(&mut headers, "sk-ant-api01-key\n").is_err()
+        );
+        assert!(
+            AiApiConfig::add_anthropic_auth_headers(&mut headers, "sk-ant-oat-token\r").is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_anthropic_without_credentials_fails_before_sending() {
+        let mut config = create_test_config(ApiType::Anthropic);
+        config.api_key = None;
+        // An unroutable URL: the request must be rejected before any network I/O.
+        config.url = "http://127.0.0.1:9/v1/messages".to_string();
+        let err = config.post_api("prompt", None, None).await.unwrap_err();
+        assert!(err.contains("No Anthropic credentials"), "{err}");
     }
 
     #[test]
@@ -555,8 +572,8 @@ mod tests {
             }]
         }"#;
 
-        let response: ChatCompletionResponse = serde_json::from_str(response_json)
-            .expect("Should parse chat completion response");
+        let response: ChatCompletionResponse =
+            serde_json::from_str(response_json).expect("Should parse chat completion response");
 
         assert_eq!(response.choices.len(), 1);
         assert_eq!(response.choices[0].message.content, "HAM|HIGH");
@@ -628,8 +645,8 @@ mod tests {
             }
         };
 
-        let model = std::env::var("ANTHROPIC_MODEL")
-            .unwrap_or_else(|_| ANTHROPIC_MODEL_HAIKU.to_string());
+        let model =
+            std::env::var("ANTHROPIC_MODEL").unwrap_or_else(|_| ANTHROPIC_MODEL_HAIKU.to_string());
 
         let config = {
             let mut headers = HeaderMap::new();
@@ -682,7 +699,10 @@ mod tests {
                 );
 
                 eprintln!("LLM classified as: {category}|{confidence}");
-                assert_eq!(category, "SPAM", "Obvious spam should be classified as SPAM");
+                assert_eq!(
+                    category, "SPAM",
+                    "Obvious spam should be classified as SPAM"
+                );
             }
             Err(err) => {
                 let err_str = err.to_string();

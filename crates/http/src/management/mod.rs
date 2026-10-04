@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
+#[cfg(feature = "enterprise")]
 pub mod ai;
 pub mod crypto;
 pub mod dkim;
@@ -28,7 +29,9 @@ pub mod enterprise;
 use enterprise::telemetry::TelemetryApi;
 // SPDX-SnippetEnd
 
+#[cfg(feature = "enterprise")]
 use ai::AiTestHandler;
+#[cfg(feature = "enterprise")]
 use crate::auth::oauth::anthropic::AnthropicOAuthHandler;
 use crate::auth::oauth::auth::OAuthApiHandler;
 use common::{Server, auth::AccessToken};
@@ -134,11 +137,10 @@ impl ManagementApi for Server {
 
                 Err(manage::unsupported("Restart is not yet supported"))
             }
-            "ai" => {
-                access_token.assert_has_permission(Permission::SettingsList)?;
-                self.handle_ai_test(req, path, body).await
-            }
+            #[cfg(feature = "enterprise")]
+            "ai" => self.handle_ai_test(req, path, body, &access_token).await,
             "oauth" => match path.get(1).copied().unwrap_or_default() {
+                #[cfg(feature = "enterprise")]
                 "anthropic" => {
                     self.handle_anthropic_oauth(req, path, access_token, body)
                         .await

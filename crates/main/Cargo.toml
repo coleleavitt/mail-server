@@ -54,7 +54,7 @@ zenoh = ["store/zenoh"]
 kafka = ["store/kafka"]
 enterprise = [ "jmap/enterprise", 
                "smtp/enterprise", 
-               "common/dev_enterprise", 
+               "common/enterprise",
                "store/enterprise", 
                "managesieve/enterprise", 
                "directory/enterprise", 
@@ -66,4 +66,5 @@ enterprise = [ "jmap/enterprise",
                "trc/enterprise",
                "services/enterprise",
                "migration/enterprise" ]
-dev_enterprise = ["enterprise"]
+# Development only: skips license validation. Never enable for production builds.
+dev_enterprise = ["enterprise", "common/dev_enterprise"]

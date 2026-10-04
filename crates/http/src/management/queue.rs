@@ -203,9 +203,12 @@ impl QueueManagement for Server {
                 let queue_id = queue_id.parse().unwrap_or_default();
                 if let Some(message_) = self.read_message_archive(queue_id).await? {
                     let message = message_.unarchive::<queue::Message>()?;
-                    if message.is_tenant_domain(&tenant_domains) {
+                    let access = message.tenant_access(&tenant_domains);
+                    if access != TenantAccess::None {
+                        let mut message = Message::from_archive(queue_id, message);
+                        access.redact(&mut message, &tenant_domains);
                         return Ok(JsonResponse::new(json!({
-                                "data": Message::from_archive(queue_id, message),
+                                "data": message,
                         }))
                         .into_http_response());
                     }
@@ -225,18 +228,21 @@ impl QueueManagement for Server {
                 let found = !result.ids.is_empty();
                 if found {
                     let server = self.clone();
+                    let tenant_domains = tenant_domains.clone();
                     tokio::spawn(async move {
                         for id in result.ids {
                             if let Some(mut message) =
                                 server.read_message(id, QueueName::default()).await
                             {
                                 let mut has_changes = false;
+                                let access = message.message.tenant_access(&tenant_domains);
 
                                 for recipient in &mut message.message.recipients {
                                     if matches!(
                                         recipient.status,
                                         Status::Scheduled | Status::TemporaryFailure(_)
-                                    ) {
+                                    ) && access.covers(recipient.domain_part(), &tenant_domains)
+                                    {
                                         recipient.retry.due = time;
                                         if recipient
                                             .expiration_time(message.message.created)
@@ -278,12 +284,11 @@ impl QueueManagement for Server {
                     .read_message(queue_id.parse().unwrap_or_default(), QueueName::default())
                     .await
                     .filter(|message| {
-                        tenant_domains
-                            .as_ref()
-                            .is_none_or(|domains| message.has_domain(domains))
+                        message.message.tenant_access(&tenant_domains) != TenantAccess::None
                     })
                 {
                     let mut found = false;
+                    let access = message.message.tenant_access(&tenant_domains);
 
                     for recipient in &mut message.message.recipients {
                         if matches!(
@@ -292,6 +297,7 @@ impl QueueManagement for Server {
                         ) && item
                             .as_ref()
                             .is_none_or(|item| recipient.address().contains(item))
+                            && access.covers(recipient.domain_part(), &tenant_domains)
                         {
                             recipient.retry.due = time;
                             if recipient
@@ -327,6 +333,7 @@ impl QueueManagement for Server {
                 let found = !result.ids.is_empty();
                 if found {
                     let server = self.clone();
+                    let tenant_domains = tenant_domains.clone();
                     tokio::spawn(async move {
                         let is_active = server.inner.data.queue_status.load(Ordering::Relaxed);
 
@@ -340,10 +347,24 @@ impl QueueManagement for Server {
                         }
 
                         for id in result.ids {
-                            if let Some(message) =
+                            if let Some(mut message) =
                                 server.read_message(id, QueueName::default()).await
                             {
-                                message.remove(&server, None).await;
+                                match message.message.tenant_access(&tenant_domains) {
+                                    TenantAccess::Full => {
+                                        message.remove(&server, None).await;
+                                    }
+                                    TenantAccess::Recipients => {
+                                        // Only this tenant's recipients are cancelled
+                                        if cancel_recipients(&mut message, |rcpt| {
+                                            TenantAccess::Recipients
+                                                .covers(rcpt.domain_part(), &tenant_domains)
+                                        }) {
+                                            finish_cancellation(&server, message).await;
+                                        }
+                                    }
+                                    TenantAccess::None => (),
+                                }
                             }
                         }
 
@@ -371,40 +392,26 @@ impl QueueManagement for Server {
                     .read_message(queue_id.parse().unwrap_or_default(), QueueName::default())
                     .await
                     .filter(|message| {
-                        tenant_domains
-                            .as_ref()
-                            .is_none_or(|domains| message.has_domain(domains))
+                        message.message.tenant_access(&tenant_domains) != TenantAccess::None
                     })
                 {
-                    let mut found = false;
-                    if let Some(item) = params.get("filter") {
-                        // Cancel delivery for all recipients that match
-                        for rcpt in &mut message.message.recipients {
-                            if rcpt.address().contains(item) {
-                                rcpt.status = Status::PermanentFailure(ErrorDetails {
-                                    entity: "localhost".into(),
-                                    details: queue::Error::Io("Delivery canceled.".into()),
-                                });
-                                found = true;
-                            }
-                        }
-                        if found {
-                            // Delete message if there are no pending deliveries
-                            if message.message.recipients.iter().any(|recipient| {
-                                matches!(
-                                    recipient.status,
-                                    Status::TemporaryFailure(_) | Status::Scheduled
-                                )
-                            }) {
-                                message.save_changes(self, None).await;
-                            } else {
-                                message.remove(self, None).await;
-                            }
-                        }
-                    } else {
+                    let access = message.message.tenant_access(&tenant_domains);
+                    let filter = params.get("filter");
+                    let found = if filter.is_none() && access == TenantAccess::Full {
                         message.remove(self, None).await;
-                        found = true;
-                    }
+                        true
+                    } else {
+                        // Cancel delivery for the matching recipients this caller
+                        // may act on; other tenants' recipients are left alone.
+                        let found = cancel_recipients(&mut message, |rcpt| {
+                            filter.is_none_or(|item| rcpt.address().contains(item))
+                                && access.covers(rcpt.domain_part(), &tenant_domains)
+                        });
+                        if found {
+                            finish_cancellation(self, message).await;
+                        }
+                        found
+                    };
 
                     Ok(JsonResponse::new(json!({
                             "data": found,
@@ -689,9 +696,8 @@ async fn fetch_queued_messages(
                 let message = message_
                     .unarchive::<queue::Message>()
                     .add_context(|ctx| ctx.ctx(trc::Key::Key, key))?;
-                let matches = tenant_domains
-                    .as_ref()
-                    .is_none_or(|domains| message.has_domain(domains))
+                let access = message.tenant_access(tenant_domains);
+                let matches = access != TenantAccess::None
                     && (!has_filters
                         || (text
                             .as_ref()
@@ -728,7 +734,9 @@ async fn fetch_queued_messages(
                         if limit == 0 || total_returned < limit {
                             let queue_id = key.deserialize_be_u64(0)?;
                             if values {
-                                result.values.push(Message::from_archive(queue_id, message));
+                                let mut value = Message::from_archive(queue_id, message);
+                                access.redact(&mut value, tenant_domains);
+                                result.values.push(value);
                             } else {
                                 result.ids.push(queue_id);
                             }
@@ -946,13 +954,153 @@ fn is_zero(num: &i16) -> bool {
     *num == 0
 }
 
-trait IsTenantDomain {
-    fn is_tenant_domain(&self, tenant_domains: &Option<Vec<String>>) -> bool;
+/// What a tenant admin may see and change on a queued message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TenantAccess {
+    /// Not a tenant, or the tenant sent the message.
+    Full,
+    /// Only recipients in the tenant's domains are visible and changeable.
+    Recipients,
+    None,
 }
-impl IsTenantDomain for ArchivedMessage {
-    fn is_tenant_domain(&self, tenant_domains: &Option<Vec<String>>) -> bool {
-        tenant_domains
-            .as_ref()
-            .is_none_or(|domains| self.has_domain(domains))
+
+impl TenantAccess {
+    fn of<'x>(
+        return_path: &str,
+        mut recipient_domains: impl Iterator<Item = &'x str>,
+        tenant_domains: &Option<Vec<String>>,
+    ) -> Self {
+        let Some(domains) = tenant_domains else {
+            return TenantAccess::Full;
+        };
+        let owns = |domain: &str| domains.iter().any(|d| d.eq_ignore_ascii_case(domain));
+        if return_path
+            .rsplit_once('@')
+            .is_some_and(|(_, domain)| owns(domain))
+        {
+            TenantAccess::Full
+        } else if recipient_domains.any(owns) {
+            TenantAccess::Recipients
+        } else {
+            TenantAccess::None
+        }
+    }
+
+    fn covers(self, recipient_domain: &str, tenant_domains: &Option<Vec<String>>) -> bool {
+        match self {
+            TenantAccess::Full => true,
+            TenantAccess::Recipients => tenant_domains.as_ref().is_some_and(|domains| {
+                domains
+                    .iter()
+                    .any(|d| d.eq_ignore_ascii_case(recipient_domain))
+            }),
+            TenantAccess::None => false,
+        }
+    }
+
+    /// Hides other tenants' recipients from an API response.
+    fn redact(self, message: &mut Message, tenant_domains: &Option<Vec<String>>) {
+        if self == TenantAccess::Recipients {
+            message.recipients.retain(|rcpt| {
+                let domain = rcpt.address.rsplit_once('@').map_or("", |(_, d)| d);
+                self.covers(domain, tenant_domains)
+            });
+        }
+    }
+}
+
+trait QueueTenantAccess {
+    fn tenant_access(&self, tenant_domains: &Option<Vec<String>>) -> TenantAccess;
+}
+
+impl QueueTenantAccess for ArchivedMessage {
+    fn tenant_access(&self, tenant_domains: &Option<Vec<String>>) -> TenantAccess {
+        TenantAccess::of(
+            self.return_path.as_ref(),
+            self.recipients.iter().map(|r| r.domain_part()),
+            tenant_domains,
+        )
+    }
+}
+
+impl QueueTenantAccess for queue::Message {
+    fn tenant_access(&self, tenant_domains: &Option<Vec<String>>) -> TenantAccess {
+        TenantAccess::of(
+            self.return_path.as_ref(),
+            self.recipients.iter().map(|r| r.domain_part()),
+            tenant_domains,
+        )
+    }
+}
+
+/// Marks matching pending recipients as cancelled; returns whether any matched.
+fn cancel_recipients(
+    message: &mut queue::MessageWrapper,
+    mut select: impl FnMut(&queue::Recipient) -> bool,
+) -> bool {
+    let mut found = false;
+    for rcpt in &mut message.message.recipients {
+        if select(rcpt) {
+            rcpt.status = Status::PermanentFailure(ErrorDetails {
+                entity: "localhost".into(),
+                details: queue::Error::Io("Delivery canceled.".into()),
+            });
+            found = true;
+        }
+    }
+    found
+}
+
+/// Saves a message after cancellations, or removes it if nothing is pending.
+async fn finish_cancellation(server: &Server, message: queue::MessageWrapper) {
+    if message.message.recipients.iter().any(|recipient| {
+        matches!(
+            recipient.status,
+            Status::TemporaryFailure(_) | Status::Scheduled
+        )
+    }) {
+        message.save_changes(server, None).await;
+    } else {
+        message.remove(server, None).await;
+    }
+}
+
+#[cfg(test)]
+mod tenant_access_tests {
+    use super::TenantAccess;
+
+    fn tenant() -> Option<Vec<String>> {
+        Some(vec!["tenant.org".to_string()])
+    }
+
+    #[test]
+    fn sender_tenant_has_full_access() {
+        let access = TenantAccess::of("a@tenant.org", ["other.com"].into_iter(), &tenant());
+        assert_eq!(access, TenantAccess::Full);
+        assert!(access.covers("other.com", &tenant()));
+    }
+
+    #[test]
+    fn recipient_tenant_only_sees_own_recipients() {
+        let access = TenantAccess::of(
+            "a@other.com",
+            ["other.com", "tenant.org"].into_iter(),
+            &tenant(),
+        );
+        assert_eq!(access, TenantAccess::Recipients);
+        assert!(access.covers("tenant.org", &tenant()));
+        assert!(!access.covers("other.com", &tenant()));
+    }
+
+    #[test]
+    fn unrelated_and_global() {
+        assert_eq!(
+            TenantAccess::of("a@x.com", ["y.com"].into_iter(), &tenant()),
+            TenantAccess::None
+        );
+        assert_eq!(
+            TenantAccess::of("a@x.com", ["y.com"].into_iter(), &None),
+            TenantAccess::Full
+        );
     }
 }

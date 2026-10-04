@@ -4,25 +4,36 @@
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
-use crate::management::stores::destroy_account_data;
-use common::{Server, auth::AccessToken};
-use directory::{
-    DirectoryInner, Permission, PrincipalData, QueryBy, QueryParams, Type,
-    backend::internal::{
-        PrincipalAction, PrincipalField, PrincipalSet, PrincipalUpdate, PrincipalValue,
-        lookup::DirectoryStore,
-        manage::{
-            self, ChangedPrincipals, ManageDirectory, PrincipalList, UpdatePrincipal, not_found,
-        },
-    },
-};
-use http_proto::{request::decode_path_element, *};
-use hyper::{Method, header};
-use serde_json::json;
 use std::future::Future;
 use std::sync::Arc;
+
+use common::Server;
+use common::auth::AccessToken;
+use directory::backend::internal::lookup::DirectoryStore;
+use directory::backend::internal::manage::{
+    self,
+    ChangedPrincipals,
+    ManageDirectory,
+    PrincipalList,
+    UpdatePrincipal,
+    not_found,
+};
+use directory::backend::internal::{
+    PrincipalAction,
+    PrincipalField,
+    PrincipalSet,
+    PrincipalUpdate,
+    PrincipalValue,
+};
+use directory::{DirectoryInner, Permission, PrincipalData, QueryBy, QueryParams, Type};
+use http_proto::request::decode_path_element;
+use http_proto::*;
+use hyper::{Method, header};
+use serde_json::json;
 use trc::AddContext;
 use utils::url_params::UrlParams;
+
+use crate::management::stores::destroy_account_data;
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "type")]
@@ -65,6 +76,58 @@ pub trait PrincipalManager: Sync + Send {
     ) -> impl Future<Output = trc::Result<HttpResponse>> + Send;
 
     fn assert_supported_directory(&self, override_: bool) -> trc::Result<()>;
+}
+
+/// TXT record a tenant admin publishes to prove control of a domain.
+const DOMAIN_VERIFICATION_LABEL: &str = "_stalwart-verification";
+
+/// Tenant admins may only claim a domain whose DNS they control: it must
+/// publish `stalwart-tenant=<tenant name>` at `_stalwart-verification.<domain>`.
+/// Without this a tenant could create `gmail.com` and gain access to other
+/// tenants' queued mail and reports for it. Global admins are not restricted.
+async fn assert_tenant_controls_domain(
+    server: &Server,
+    access_token: &AccessToken,
+    domain: &str,
+) -> trc::Result<()> {
+    let Some(tenant) = access_token.tenant else {
+        return Ok(());
+    };
+    let domain = domain.trim_end_matches('.').to_lowercase();
+    let unverified = |reason: String| {
+        trc::SecurityEvent::Unauthorized
+            .into_err()
+            .details("Domain ownership not verified")
+            .ctx(trc::Key::Domain, domain.clone())
+            .ctx(trc::Key::Reason, reason)
+    };
+
+    if psl::suffix_str(&domain).is_none_or(|suffix| suffix == domain) {
+        return Err(unverified("public suffixes cannot be claimed".into()));
+    }
+
+    let tenant_name = server
+        .store()
+        .get_principal_name(tenant.id)
+        .await
+        .caused_by(trc::location!())?
+        .ok_or_else(|| trc::ManageEvent::NotFound.into_err())?;
+    let expected = format!("stalwart-tenant={tenant_name}");
+    let record = format!("{DOMAIN_VERIFICATION_LABEL}.{domain}.");
+
+    match server.core.smtp.resolvers.dns.txt_raw_lookup(&record).await {
+        Ok(txt)
+            if std::str::from_utf8(&txt).is_ok_and(|txt| {
+                txt.split(|c: char| c.is_whitespace() || c == ';' || c == '"')
+                    .any(|token| token == expected)
+            }) =>
+        {
+            Ok(())
+        }
+        _ => Err(unverified(format!(
+            "publish a TXT record {record} containing \"{expected}\""
+        ))),
+    }
 }
 
 impl PrincipalManager for Server {
@@ -158,6 +221,11 @@ impl PrincipalManager for Server {
                             ));
                         }
                     }
+                }
+
+                // Tenants must prove they control a domain before claiming it
+                if principal.typ() == Type::Domain {
+                    assert_tenant_controls_domain(self, access_token, principal.name()).await?;
                 }
 
                 // Set default report domain if missing
@@ -563,6 +631,13 @@ impl PrincipalManager for Server {
                         let mut invalidate_logo_cache = false;
                         for change in &changes {
                             match change.field {
+                                PrincipalField::Name if typ == Type::Domain => {
+                                    // Renaming is another way to claim a domain
+                                    if let PrincipalValue::String(new_name) = &change.value {
+                                        assert_tenant_controls_domain(self, access_token, new_name)
+                                            .await?;
+                                    }
+                                }
                                 PrincipalField::Secrets
                                 | PrincipalField::Name
                                 | PrincipalField::Emails

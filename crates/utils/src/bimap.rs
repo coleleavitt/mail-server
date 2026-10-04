@@ -4,22 +4,22 @@
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
-use std::{borrow::Borrow, hash::Hash, rc::Rc};
+use std::borrow::Borrow;
+use std::hash::Hash;
+use std::sync::Arc;
 
 use ahash::AHashMap;
 
 #[derive(Debug)]
 #[repr(transparent)]
-struct StringRef<T: IdBimapItem>(Rc<T>);
-
-#[derive(Debug)]
-#[repr(transparent)]
-struct IdRef<T: IdBimapItem>(Rc<T>);
+struct StringRef<T: IdBimapItem>(Arc<T>);
 
 #[derive(Debug, Default)]
 pub struct IdBimap<T: IdBimapItem> {
-    id_to_name: AHashMap<IdRef<T>, Rc<T>>,
-    name_to_id: AHashMap<StringRef<T>, Rc<T>>,
+    // Keyed by the id itself: a wrapper key hashed via `Hash` does not match
+    // ahash's specialized `u32` hashing used by lookups, so `by_id` never hit.
+    id_to_name: AHashMap<u32, Arc<T>>,
+    name_to_id: AHashMap<StringRef<T>, Arc<T>>,
 }
 
 impl<T: IdBimapItem> IdBimap<T> {
@@ -31,8 +31,8 @@ impl<T: IdBimapItem> IdBimap<T> {
     }
 
     pub fn insert(&mut self, item: T) {
-        let item = Rc::new(item);
-        self.id_to_name.insert(IdRef(item.clone()), item.clone());
+        let item = Arc::new(item);
+        self.id_to_name.insert(*item.id(), item.clone());
         self.name_to_id.insert(StringRef(item.clone()), item);
     }
 
@@ -53,13 +53,8 @@ impl<T: IdBimapItem> IdBimap<T> {
     }
 }
 
-// SAFETY: every Rc clone lives inside this struct and is never handed out, so
-// moving the whole map moves all reference counts together, and `&self` methods
-// never touch the counts. What does cross threads is `T` itself (moved with the
-// map, or shared via the `&T` returned by `by_name`/`by_id`/`iter`), so `T` must
-// be Send for Send and Sync for Sync.
-unsafe impl<T: IdBimapItem + Send> Send for IdBimap<T> {}
-unsafe impl<T: IdBimapItem + Sync> Sync for IdBimap<T> {}
+// No manual Send/Sync impls: Arc<T> makes the map Send + Sync exactly when T
+// is Send + Sync, which the compiler checks.
 
 pub trait IdBimapItem: std::fmt::Debug {
     fn id(&self) -> &u32;
@@ -72,12 +67,6 @@ impl<T: IdBimapItem> Borrow<str> for StringRef<T> {
     }
 }
 
-impl<T: IdBimapItem> Borrow<u32> for IdRef<T> {
-    fn borrow(&self) -> &u32 {
-        self.0.id()
-    }
-}
-
 impl<T: IdBimapItem> PartialEq for StringRef<T> {
     fn eq(&self, other: &Self) -> bool {
         self.0.name() == other.0.name()
@@ -86,22 +75,36 @@ impl<T: IdBimapItem> PartialEq for StringRef<T> {
 
 impl<T: IdBimapItem> Eq for StringRef<T> {}
 
-impl<T: IdBimapItem> PartialEq for IdRef<T> {
-    fn eq(&self, other: &Self) -> bool {
-        self.0.id() == other.0.id()
-    }
-}
-
-impl<T: IdBimapItem> Eq for IdRef<T> {}
-
 impl<T: IdBimapItem> Hash for StringRef<T> {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         self.0.name().hash(state)
     }
 }
 
-impl<T: IdBimapItem> Hash for IdRef<T> {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.0.id().hash(state)
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[derive(Debug)]
+    struct Item(u32, String);
+
+    impl IdBimapItem for Item {
+        fn id(&self) -> &u32 {
+            &self.0
+        }
+        fn name(&self) -> &str {
+            &self.1
+        }
+    }
+
+    #[test]
+    fn thread_safe_and_lookups_work() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<IdBimap<Item>>();
+
+        let mut map = IdBimap::with_capacity(1);
+        map.insert(Item(7, "seven".into()));
+        assert_eq!(map.by_id(7).map(|i| i.name()), Some("seven"));
+        assert_eq!(map.by_name("seven").map(|i| *i.id()), Some(7));
     }
 }

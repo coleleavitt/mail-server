@@ -193,8 +193,10 @@ impl AiApiConfig {
         }
 
         // Send request
+        // Credentials ride in headers; a redirect must not forward them elsewhere.
         let response = reqwest::Client::builder()
             .timeout(self.timeout)
+            .redirect(reqwest::redirect::Policy::none())
             .danger_accept_invalid_certs(self.tls_allow_invalid_certs)
             .build()
             .map_err(|err| format!("Failed to create HTTP client: {}", err))?

@@ -67,5 +67,5 @@ contributors = [
 ]
 
 [env]
-var1 = !CARGO_PKG_NAME
-var2 = !CARGO_PKG_NAME #comment
+var1 = "%{env:CARGO_PKG_NAME}%"
+var2 = "%{env:CARGO_PKG_NAME}%" #comment

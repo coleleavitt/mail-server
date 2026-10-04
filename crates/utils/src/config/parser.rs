@@ -442,8 +442,8 @@ mod tests {
 
     use crate::config::Config;
 
-    #[test]
-    fn toml_parse() {
+    #[tokio::test]
+    async fn toml_parse() {
         let file = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .unwrap()
@@ -458,6 +458,8 @@ mod tests {
 
         let mut config = Config::default();
         config.parse(&fs::read_to_string(file).unwrap()).unwrap();
+        config.resolve_macros(&["env"]).await;
+        assert!(config.errors.is_empty(), "{:?}", config.errors);
         let expected = BTreeMap::from_iter(
             [
                 ("arrays.colors.0000", "red"),

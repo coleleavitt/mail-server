@@ -180,8 +180,10 @@ pub async fn refresh(previous: &ClaudeTokens) -> Result<ClaudeTokens, TokenError
 }
 
 async fn request_token(body: &serde_json::Value) -> Result<TokenResponse, TokenError> {
+    // The body carries the refresh token or auth code; never resend it elsewhere.
     let response = reqwest::Client::builder()
         .timeout(REQUEST_TIMEOUT)
+        .redirect(reqwest::redirect::Policy::none())
         .build()
         .map_err(|err| TokenError::Network(err.to_string()))?
         .post(CLAUDE_TOKEN_URL)

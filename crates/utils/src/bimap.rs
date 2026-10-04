@@ -53,9 +53,13 @@ impl<T: IdBimapItem> IdBimap<T> {
     }
 }
 
-// SAFETY: Safe because Rc<> are never returned from the struct
-unsafe impl<T: IdBimapItem> Send for IdBimap<T> {}
-unsafe impl<T: IdBimapItem> Sync for IdBimap<T> {}
+// SAFETY: every Rc clone lives inside this struct and is never handed out, so
+// moving the whole map moves all reference counts together, and `&self` methods
+// never touch the counts. What does cross threads is `T` itself (moved with the
+// map, or shared via the `&T` returned by `by_name`/`by_id`/`iter`), so `T` must
+// be Send for Send and Sync for Sync.
+unsafe impl<T: IdBimapItem + Send> Send for IdBimap<T> {}
+unsafe impl<T: IdBimapItem + Sync> Sync for IdBimap<T> {}
 
 pub trait IdBimapItem: std::fmt::Debug {
     fn id(&self) -> &u32;

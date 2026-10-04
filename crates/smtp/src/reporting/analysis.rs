@@ -4,23 +4,19 @@
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
+use std::borrow::Cow;
+use std::collections::hash_map::Entry;
+use std::io::{Cursor, Read};
+
 use ahash::AHashMap;
 use common::Server;
-use mail_auth::{
-    flate2::read::GzDecoder,
-    report::{ActionDisposition, DmarcResult, Feedback, Report, tlsrpt::TlsReport},
-    zip,
-};
+use mail_auth::flate2::read::GzDecoder;
+use mail_auth::report::tlsrpt::TlsReport;
+use mail_auth::report::{ActionDisposition, DmarcResult, Feedback, Report};
+use mail_auth::zip;
 use mail_parser::{Message, MimeHeaders, PartType};
-use std::{
-    borrow::Cow,
-    collections::hash_map::Entry,
-    io::{Cursor, Read},
-};
-use store::{
-    Serialize,
-    write::{Archiver, BatchBuilder, ReportClass, ValueClass, now},
-};
+use store::Serialize;
+use store::write::{Archiver, BatchBuilder, ReportClass, ValueClass, now};
 use trc::IncomingReportEvent;
 
 enum Compression {
@@ -498,7 +494,32 @@ impl<T> IncomingReport<T> {
     pub fn has_domain(&self, domain: &[String]) -> bool {
         self.to
             .iter()
-            .any(|to| domain.iter().any(|d| to.ends_with(d.as_str())))
-            || domain.iter().any(|d| self.from.ends_with(d.as_str()))
+            .chain(std::iter::once(&self.from))
+            .any(|addr| domain.iter().any(|d| address_in_domain(addr, d)))
+    }
+}
+
+/// True when the address' domain is `domain` or a subdomain of it. A plain
+/// suffix match would let `example.com` claim `badexample.com`.
+fn address_in_domain(address: &str, domain: &str) -> bool {
+    let host = address.rsplit_once('@').map_or(address, |(_, host)| host);
+    host.len() >= domain.len()
+        && host
+            .get(host.len() - domain.len()..)
+            .is_some_and(|tail| tail.eq_ignore_ascii_case(domain))
+        && (host.len() == domain.len() || host.as_bytes()[host.len() - domain.len() - 1] == b'.')
+}
+
+#[cfg(test)]
+mod tests {
+    use super::address_in_domain;
+
+    #[test]
+    fn domain_match_requires_label_boundary() {
+        assert!(address_in_domain("dmarc@example.com", "example.com"));
+        assert!(address_in_domain("dmarc@mail.Example.com", "example.com"));
+        assert!(!address_in_domain("dmarc@badexample.com", "example.com"));
+        assert!(!address_in_domain("dmarc@example.com.evil", "example.com"));
+        assert!(!address_in_domain("x@é.com", "xé.com"));
     }
 }

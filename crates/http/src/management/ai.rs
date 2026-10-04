@@ -56,12 +56,11 @@ impl AiTestHandler for Server {
                         .details(format!("AI model '{}' not found", model_name))
                 })?;
 
-                let oauth_token =
-                    if matches!(model.api_type, common::enterprise::llm::ApiType::Anthropic) {
-                        self.anthropic_oauth_token().await
-                    } else {
-                        None
-                    };
+                let oauth_token = if model.accepts_anthropic_oauth() {
+                    self.anthropic_oauth_token().await
+                } else {
+                    None
+                };
                 let used_oauth = oauth_token.is_some();
 
                 match model

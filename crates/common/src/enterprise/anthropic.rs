@@ -251,9 +251,11 @@ impl Server {
     }
 
     pub async fn store_anthropic_tokens(&self, tokens: ClaudeTokens) -> trc::Result<()> {
+        // Hold the lock so an in-flight refresh cannot overwrite a fresh login.
+        let mut state = REFRESH_STATE.lock().await;
         self.persist_anthropic_tokens(tokens).await?;
-        // New tokens (login or successful refresh) clear any remembered failure.
-        *REFRESH_STATE.lock().await = RefreshState::default();
+        // New tokens clear any remembered failure.
+        *state = RefreshState::default();
         Ok(())
     }
 
@@ -275,11 +277,15 @@ impl Server {
     }
 
     pub async fn delete_anthropic_tokens(&self) -> trc::Result<()> {
+        // Hold the lock so an in-flight refresh cannot resurrect the tokens.
+        let mut state = REFRESH_STATE.lock().await;
         self.core
             .storage
             .lookup
             .key_delete(KeyValue::<()>::build_key(KV_ANTHROPIC_TOKENS, TOKENS_KEY))
-            .await
+            .await?;
+        *state = RefreshState::default();
+        Ok(())
     }
 
     /// Refreshes and persists the stored tokens unconditionally. Used by the
@@ -314,9 +320,14 @@ impl Server {
             return Some(tokens.access_token);
         }
 
-        let mut state = REFRESH_STATE.lock().await;
+        // Never queue behind a refresh in progress: it can take up to the request
+        // timeout and every inbound message would stall on it. Use the current
+        // token while it is still valid, otherwise skip the LLM for this message.
+        let Ok(mut state) = REFRESH_STATE.try_lock() else {
+            return (tokens.expires_at > now).then_some(tokens.access_token);
+        };
 
-        // Another task may have refreshed while we waited for the lock.
+        // Another task may have refreshed before we took the lock.
         let tokens = self.anthropic_access_tokens().await?;
         if tokens.is_fresh(now) {
             return Some(tokens.access_token);
@@ -336,9 +347,13 @@ impl Server {
         match refresh(&tokens).await {
             Ok(new_tokens) => {
                 let access_token = new_tokens.access_token.clone();
-                if let Err(err) = self.persist_anthropic_tokens(new_tokens).await {
-                    // The refresh token may have been rotated; without persisting
-                    // it the next refresh will fail.
+                // The refresh token may have been rotated; losing it means the next
+                // refresh fails permanently, so retry the write once.
+                let mut persisted = self.persist_anthropic_tokens(new_tokens.clone()).await;
+                if persisted.is_err() {
+                    persisted = self.persist_anthropic_tokens(new_tokens).await;
+                }
+                if let Err(err) = persisted {
                     trc::error!(err.details("Failed to persist refreshed Anthropic tokens"));
                 }
                 *state = RefreshState::default();

@@ -4,50 +4,46 @@
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
-use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
-use common::{
-    auth::AccessToken,
-    ipc::{HousekeeperEvent, PurgeType},
-    manager::webadmin::Resource,
-    storage::index::ObjectIndexBuilder,
-    *,
-};
-use directory::{
-    Permission,
-    backend::internal::manage::{self, ManageDirectory},
-};
-use email::{
-    cache::MessageCacheFetch,
-    message::{
-        ingest::EmailIngest,
-        metadata::{MessageData, MessageMetadata},
-    },
-    sieve::SieveScript,
-};
-use groupware::{
-    calendar::{Calendar, CalendarEvent, CalendarEventNotification},
-    contact::{AddressBook, ContactCard},
-    file::FileNode,
-};
-use http_proto::{request::decode_path_element, *};
+use std::future::Future;
+
+use base64::Engine;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use common::auth::AccessToken;
+use common::ipc::{HousekeeperEvent, PurgeType};
+use common::manager::webadmin::Resource;
+use common::storage::index::ObjectIndexBuilder;
+use common::*;
+use directory::Permission;
+use directory::backend::internal::manage::{self, ManageDirectory};
+use email::cache::MessageCacheFetch;
+use email::message::ingest::EmailIngest;
+use email::message::metadata::{MessageData, MessageMetadata};
+use email::sieve::SieveScript;
+use groupware::calendar::{Calendar, CalendarEvent, CalendarEventNotification};
+use groupware::contact::{AddressBook, ContactCard};
+use groupware::file::FileNode;
+use http_proto::request::decode_path_element;
+use http_proto::*;
 use hyper::Method;
 use serde_json::json;
 use services::task_manager::index::ReindexIndexTask;
-use std::future::Future;
-use store::{
-    Serialize, ValueKey, rand,
-    search::SearchQuery,
-    write::{
-        AlignedBytes, Archive, Archiver, BatchBuilder, BlobLink, BlobOp, DirectoryClass,
-        SearchIndex, ValueClass,
-    },
+use store::search::SearchQuery;
+use store::write::{
+    AlignedBytes,
+    Archive,
+    Archiver,
+    BatchBuilder,
+    BlobLink,
+    BlobOp,
+    DirectoryClass,
+    SearchIndex,
+    ValueClass,
 };
+use store::{Serialize, ValueKey, rand};
 use trc::AddContext;
-use types::{
-    blob_hash::BlobHash,
-    collection::Collection,
-    field::{EmailField, Field, MailboxField},
-};
+use types::blob_hash::BlobHash;
+use types::collection::Collection;
+use types::field::{EmailField, Field, MailboxField};
 use utils::url_params::UrlParams;
 
 // SPDX-SnippetBegin
@@ -261,7 +257,7 @@ impl ManageStore for Server {
                 access_token.assert_has_permission(Permission::Undelete)?;
 
                 if self.core.is_enterprise_edition() {
-                    self.handle_undelete_api_request(req, path, body, session)
+                    self.handle_undelete_api_request(req, path, body, session, access_token)
                         .await
                 } else {
                     Err(manage::enterprise())
@@ -269,6 +265,9 @@ impl ManageStore for Server {
             }
             // SPDX-SnippetEnd
             (Some("uids"), Some(account_id), None, &Method::DELETE) => {
+                // Validate the access token
+                access_token.assert_has_permission(Permission::PurgeAccount)?;
+
                 let account_id = self
                     .core
                     .storage
@@ -285,6 +284,9 @@ impl ManageStore for Server {
                 .into_http_response())
             }
             (Some("quota"), Some(account_id), None, method @ (&Method::GET | &Method::DELETE)) => {
+                // Validate the access token
+                access_token.assert_has_permission(Permission::PurgeAccount)?;
+
                 let account_id = self
                     .core
                     .storage

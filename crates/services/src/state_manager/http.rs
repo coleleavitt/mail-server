@@ -4,22 +4,24 @@
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
-use super::{Event, ece::ece_encrypt};
-use crate::state_manager::PushRegistration;
+use std::time::{Duration, Instant};
+
 use base64::Engine;
 use calcard::jscalendar::JSCalendarDateTime;
 use common::ipc::PushNotification;
 use email::push::PushSubscription;
-use jmap_proto::{
-    response::status::{EmailPushObject, PushObject},
-    types::state::State,
-};
+use jmap_proto::response::status::{EmailPushObject, PushObject};
+use jmap_proto::types::state::State;
 use reqwest::header::{CONTENT_ENCODING, CONTENT_TYPE};
-use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use trc::PushSubscriptionEvent;
-use types::{id::Id, type_state::DataType};
+use types::id::Id;
+use types::type_state::DataType;
 use utils::map::vec_map::VecMap;
+
+use super::Event;
+use super::ece::ece_encrypt;
+use crate::state_manager::PushRegistration;
 
 impl PushRegistration {
     pub fn send(&mut self, id: Id, push_tx: mpsc::Sender<Event>, push_timeout: Duration) {
@@ -101,14 +103,30 @@ pub(crate) async fn http_request(
     mut body: String,
     push_timeout: Duration,
 ) -> bool {
-    let client_builder = reqwest::Client::builder().timeout(push_timeout);
-
+    // Tests push to a local endpoint with a self-signed certificate.
     #[cfg(feature = "test_mode")]
-    let client_builder = client_builder.danger_accept_invalid_certs(true);
+    let client = reqwest::Client::builder()
+        .timeout(push_timeout)
+        .danger_accept_invalid_certs(true)
+        .build();
 
-    let mut client = client_builder
-        .build()
-        .unwrap_or_default()
+    // The URL is user supplied: public addresses only, no redirects.
+    #[cfg(not(feature = "test_mode"))]
+    let client = if utils::ssrf::is_public_https_url(&details.url) {
+        utils::ssrf::public_http_client(push_timeout)
+    } else {
+        trc::event!(
+            PushSubscription(PushSubscriptionEvent::Error),
+            Details = "Refusing push to a non-public URL",
+            Url = details.url.to_string(),
+        );
+        return false;
+    };
+
+    let Ok(client) = client else {
+        return false;
+    };
+    let mut client = client
         .post(details.url.as_str())
         .header(CONTENT_TYPE, "application/json")
         .header("TTL", "86400");

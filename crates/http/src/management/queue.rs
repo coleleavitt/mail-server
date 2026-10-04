@@ -4,40 +4,38 @@
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
-use super::FutureTimestamp;
-use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
-use common::{
-    Server,
-    auth::AccessToken,
-    config::smtp::queue::{ArchivedQueueExpiry, QueueExpiry, QueueName},
-    ipc::QueueEvent,
-};
-use directory::{Permission, Type, backend::internal::manage::ManageDirectory};
-use http_proto::{request::decode_path_element, *};
+use std::future::Future;
+use std::sync::atomic::Ordering;
+
+use base64::Engine;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use common::Server;
+use common::auth::AccessToken;
+use common::config::smtp::queue::{ArchivedQueueExpiry, QueueExpiry, QueueName};
+use common::ipc::QueueEvent;
+use directory::backend::internal::manage::ManageDirectory;
+use directory::{Permission, Type};
+use http_proto::request::decode_path_element;
+use http_proto::*;
 use hyper::Method;
-use mail_auth::{
-    dmarc::URI,
-    mta_sts::ReportUri,
-    report::{self, tlsrpt::TlsReport},
-};
+use mail_auth::dmarc::URI;
+use mail_auth::mta_sts::ReportUri;
+use mail_auth::report::tlsrpt::TlsReport;
+use mail_auth::report::{self};
 use mail_parser::DateTime;
 use serde::{Deserializer, Serializer};
 use serde_json::json;
-use smtp::{
-    queue::{
-        self, ArchivedMessage, ArchivedStatus, ErrorDetails, QueueId, Status, spool::SmtpSpool,
-    },
-    reporting::{dmarc::DmarcReporting, tls::TlsReporting},
-};
-use std::{future::Future, sync::atomic::Ordering};
-use store::{
-    Deserialize, IterateParams, ValueKey,
-    write::{
-        AlignedBytes, Archive, QueueClass, ReportEvent, ValueClass, key::DeserializeBigEndian, now,
-    },
-};
+use smtp::queue::spool::SmtpSpool;
+use smtp::queue::{self, ArchivedMessage, ArchivedStatus, ErrorDetails, QueueId, Status};
+use smtp::reporting::dmarc::DmarcReporting;
+use smtp::reporting::tls::TlsReporting;
+use store::write::key::DeserializeBigEndian;
+use store::write::{AlignedBytes, Archive, QueueClass, ReportEvent, ValueClass, now};
+use store::{Deserialize, IterateParams, ValueKey};
 use trc::AddContext;
 use utils::url_params::UrlParams;
+
+use super::FutureTimestamp;
 
 #[derive(Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub struct Message {
@@ -554,6 +552,16 @@ impl QueueManagement for Server {
             ("status", Some(action), &Method::PATCH) => {
                 // Validate the access token
                 access_token.assert_has_permission(Permission::MessageQueueUpdate)?;
+
+                // Pausing the queue affects every tenant
+                if access_token.tenant.is_some() {
+                    trc::bail!(
+                        trc::SecurityEvent::Unauthorized
+                            .into_err()
+                            .details(Permission::MessageQueueUpdate.name())
+                            .ctx(trc::Key::Reason, "Tenants cannot pause the shared queue")
+                    );
+                }
 
                 let prev_status = self.inner.data.queue_status.load(Ordering::Relaxed);
 

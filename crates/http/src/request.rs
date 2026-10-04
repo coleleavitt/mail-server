@@ -4,57 +4,66 @@
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
-use crate::{
-    HttpSessionManager,
-    auth::{
-        authenticate::{Authenticator, HttpHeaders},
-        oauth::{
-            FormData, auth::OAuthApiHandler, openid::OpenIdHandler,
-            registration::ClientRegistrationHandler, token::TokenHandler,
-        },
-    },
-    autoconfig::Autoconfig,
-    form::FormHandler,
-    management::{
-        ManagementApi, ToManageHttpResponse, UnauthorizedResponse, troubleshoot::TroubleshootApi,
-    },
-};
-use common::{
-    Inner, KV_ACME, Server,
-    auth::{AccessToken, oauth::GrantType},
-    core::BuildServer,
-    ipc::PushEvent,
-    listener::{SessionData, SessionManager, SessionStream},
-    manager::webadmin::Resource,
-};
-use dav::{DavMethod, request::DavRequestHandler};
+use std::net::IpAddr;
+use std::str::FromStr;
+use std::sync::Arc;
+
+use common::auth::AccessToken;
+use common::auth::oauth::GrantType;
+use common::core::BuildServer;
+use common::ipc::PushEvent;
+use common::listener::{SessionData, SessionManager, SessionStream};
+use common::manager::webadmin::Resource;
+use common::{Inner, KV_ACME, Server};
+use dav::DavMethod;
+use dav::request::DavRequestHandler;
 use directory::Permission;
-use groupware::{DavResourceName, calendar::itip::ItipIngest};
+use groupware::DavResourceName;
+use groupware::calendar::itip::ItipIngest;
+use http_proto::request::fetch_body;
 use http_proto::{
-    DownloadResponse, HtmlResponse, HttpContext, HttpRequest, HttpResponse, HttpResponseBody,
-    HttpSessionData, JsonProblemResponse, ToHttpResponse, form_urlencoded, request::fetch_body,
+    DownloadResponse,
+    HtmlResponse,
+    HttpContext,
+    HttpRequest,
+    HttpResponse,
+    HttpResponseBody,
+    HttpSessionData,
+    JsonProblemResponse,
+    ToHttpResponse,
+    form_urlencoded,
 };
-use hyper::{
-    Method, StatusCode, body,
-    header::{self, CONTENT_TYPE},
-    server::conn::http1,
-    service::service_fn,
-};
+use hyper::header::{self, CONTENT_TYPE};
+use hyper::server::conn::http1;
+use hyper::service::service_fn;
+use hyper::{Method, StatusCode, body};
 use hyper_util::rt::TokioIo;
-use jmap::{
-    api::{
-        ToJmapHttpResponse, event_source::EventSourceHandler, request::RequestHandler,
-        session::SessionHandler,
-    },
-    blob::{download::BlobDownload, upload::BlobUpload},
-    websocket::upgrade::WebSocketUpgrade,
-};
-use jmap_proto::request::{Request, capability::Session};
-use std::{net::IpAddr, str::FromStr, sync::Arc};
+use jmap::api::ToJmapHttpResponse;
+use jmap::api::event_source::EventSourceHandler;
+use jmap::api::request::RequestHandler;
+use jmap::api::session::SessionHandler;
+use jmap::blob::download::BlobDownload;
+use jmap::blob::upload::BlobUpload;
+use jmap::websocket::upgrade::WebSocketUpgrade;
+use jmap_proto::request::Request;
+use jmap_proto::request::capability::Session;
 use store::dispatch::lookup::KeyValue;
 use trc::SecurityEvent;
-use types::{blob::BlobId, id::Id};
+use types::blob::BlobId;
+use types::id::Id;
 use utils::url_params::UrlParams;
+
+use crate::HttpSessionManager;
+use crate::auth::authenticate::{Authenticator, HttpHeaders};
+use crate::auth::oauth::FormData;
+use crate::auth::oauth::auth::OAuthApiHandler;
+use crate::auth::oauth::openid::OpenIdHandler;
+use crate::auth::oauth::registration::ClientRegistrationHandler;
+use crate::auth::oauth::token::TokenHandler;
+use crate::autoconfig::Autoconfig;
+use crate::form::FormHandler;
+use crate::management::troubleshoot::TroubleshootApi;
+use crate::management::{ManagementApi, ToManageHttpResponse, UnauthorizedResponse};
 
 pub trait ParseHttp: Sync + Send {
     fn parse_http_request(
@@ -686,43 +695,11 @@ async fn handle_session<T: SessionStream>(inner: Arc<Inner>, session: SessionDat
                         );
 
                         session.remote_ip
-                    } else if let Some(forwarded_for) = req
-                        .headers()
-                        .get(header::FORWARDED)
-                        .and_then(|h| h.to_str().ok())
-                        .and_then(|h| {
-                            let h = h.to_ascii_lowercase();
-                            h.split_once("for=").and_then(|(_, rest)| {
-                                let mut start_ip = usize::MAX;
-                                let mut end_ip = usize::MAX;
-
-                                for (pos, ch) in rest.char_indices() {
-                                    match ch {
-                                        '0'..='9' | 'a'..='f' | ':' | '.' => {
-                                            if start_ip == usize::MAX {
-                                                start_ip = pos;
-                                            }
-                                            end_ip = pos;
-                                        }
-                                        '"' | '[' | ' ' if start_ip == usize::MAX => {}
-                                        _ => {
-                                            break;
-                                        }
-                                    }
-                                }
-
-                                rest.get(start_ip..=end_ip)
-                                    .and_then(|h| h.parse::<IpAddr>().ok())
-                            })
-                        })
-                        .or_else(|| {
-                            req.headers()
-                                .get("X-Forwarded-For")
-                                .and_then(|h| h.to_str().ok())
-                                .map(|h| h.split_once(',').map_or(h, |(ip, _)| ip).trim())
-                                .and_then(|h| h.parse::<IpAddr>().ok())
-                        })
-                    {
+                    } else if let Some(forwarded_for) = forwarded_client_ip(
+                        req.headers(),
+                        session.remote_ip,
+                        &server.core.jmap.http_trusted_proxies,
+                    ) {
                         // Check if the forwarded IP has been blocked
                         if server.is_ip_blocked(&forwarded_for) {
                             trc::event!(
@@ -854,5 +831,140 @@ impl SessionManager for HttpSessionManager {
         async {
             let _ = self.inner.ipc.push_tx.send(PushEvent::Stop).await;
         }
+    }
+}
+
+/// Client address from `Forwarded`/`X-Forwarded-For`, honoured only when the
+/// connection comes from a trusted proxy. Walks the chain right to left and
+/// returns the first hop that is not itself a trusted proxy: entries further
+/// left were supplied by the client and can be forged.
+fn forwarded_client_ip(
+    headers: &hyper::HeaderMap,
+    peer: IpAddr,
+    trusted: &[utils::config::ipmask::IpAddrMask],
+) -> Option<IpAddr> {
+    let is_trusted = |ip: &IpAddr| trusted.iter().any(|mask| mask.matches(ip));
+    if !is_trusted(&peer) {
+        return None;
+    }
+
+    let chain: Vec<IpAddr> = if let Some(forwarded) = headers
+        .get_all(header::FORWARDED)
+        .iter()
+        .filter_map(|h| h.to_str().ok())
+        .map(|h| h.to_string())
+        .reduce(|a, b| format!("{a},{b}"))
+    {
+        forwarded
+            .split(',')
+            .filter_map(|element| {
+                element.split(';').find_map(|pair| {
+                    let (key, value) = pair.trim().split_once('=')?;
+                    key.trim()
+                        .eq_ignore_ascii_case("for")
+                        .then(|| parse_forwarded_node(value.trim()))
+                        .flatten()
+                })
+            })
+            .collect()
+    } else {
+        headers
+            .get_all("X-Forwarded-For")
+            .iter()
+            .filter_map(|h| h.to_str().ok())
+            .flat_map(|h| h.split(','))
+            .filter_map(|ip| parse_forwarded_node(ip.trim()))
+            .collect()
+    };
+
+    chain
+        .iter()
+        .rev()
+        .find(|ip| !is_trusted(ip))
+        .or_else(|| chain.first())
+        .copied()
+}
+
+/// Parses `1.2.3.4`, `1.2.3.4:80`, `"[2001:db8::1]:443"` or `2001:db8::1`.
+fn parse_forwarded_node(value: &str) -> Option<IpAddr> {
+    let value = value.trim_matches('"');
+    if let Some(v6) = value.strip_prefix('[') {
+        return v6.split_once(']')?.0.parse().ok();
+    }
+    value.parse().ok().or_else(|| {
+        value
+            .rsplit_once(':')
+            .and_then(|(host, _)| host.parse::<std::net::Ipv4Addr>().ok())
+            .map(IpAddr::V4)
+    })
+}
+
+#[cfg(test)]
+mod forwarded_tests {
+    use hyper::HeaderMap;
+    use utils::config::ipmask::IpAddrMask;
+
+    use super::*;
+
+    fn loopback() -> Vec<IpAddrMask> {
+        vec![IpAddrMask::V4 {
+            addr: "127.0.0.0".parse().unwrap(),
+            mask: 0xff00_0000,
+        }]
+    }
+
+    fn headers(pairs: &[(&'static str, &str)]) -> HeaderMap {
+        let mut map = HeaderMap::new();
+        for (k, v) in pairs {
+            map.append(*k, v.parse().unwrap());
+        }
+        map
+    }
+
+    #[test]
+    fn untrusted_peer_is_ignored() {
+        let h = headers(&[("x-forwarded-for", "203.0.113.7")]);
+        assert_eq!(
+            forwarded_client_ip(&h, "198.51.100.1".parse().unwrap(), &loopback()),
+            None
+        );
+    }
+
+    #[test]
+    fn spoofed_leftmost_entry_is_skipped() {
+        // Client sent "203.0.113.7"; nginx appended the real address.
+        let h = headers(&[("x-forwarded-for", "203.0.113.7, 198.51.100.9")]);
+        assert_eq!(
+            forwarded_client_ip(&h, "127.0.0.1".parse().unwrap(), &loopback()),
+            Some("198.51.100.9".parse().unwrap())
+        );
+    }
+
+    #[test]
+    fn forwarded_header_takes_precedence() {
+        let h = headers(&[
+            (
+                "forwarded",
+                "for=203.0.113.7, for=\"[2001:db8::1]:443\";proto=https",
+            ),
+            ("x-forwarded-for", "192.0.2.1"),
+        ]);
+        assert_eq!(
+            forwarded_client_ip(&h, "127.0.0.1".parse().unwrap(), &loopback()),
+            Some("2001:db8::1".parse().unwrap())
+        );
+    }
+
+    #[test]
+    fn node_forms() {
+        assert_eq!(
+            parse_forwarded_node("1.2.3.4:80"),
+            Some("1.2.3.4".parse().unwrap())
+        );
+        assert_eq!(
+            parse_forwarded_node("2001:db8::1"),
+            Some("2001:db8::1".parse().unwrap())
+        );
+        assert_eq!(parse_forwarded_node("unknown"), None);
     }
 }

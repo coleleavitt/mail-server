@@ -4,27 +4,32 @@
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
-use base64::{Engine, engine::general_purpose};
-use common::{Server, auth::AccessToken, ipc::PushEvent};
+use std::future::Future;
+
+use base64::Engine;
+use base64::engine::general_purpose;
+use common::Server;
+use common::auth::AccessToken;
+use common::ipc::PushEvent;
 use email::push::{Keys, PushSubscription, PushSubscriptions};
-use jmap_proto::{
-    error::set::{SetError, SetErrorType},
-    method::set::{SetRequest, SetResponse},
-    object::push_subscription::{self, PushSubscriptionProperty, PushSubscriptionValue},
-    references::resolve::ResolveCreatedReference,
-    request::IntoValid,
-    types::date::UTCDate,
+use jmap_proto::error::set::{SetError, SetErrorType};
+use jmap_proto::method::set::{SetRequest, SetResponse};
+use jmap_proto::object::push_subscription::{
+    self,
+    PushSubscriptionProperty,
+    PushSubscriptionValue,
 };
+use jmap_proto::references::resolve::ResolveCreatedReference;
+use jmap_proto::request::IntoValid;
+use jmap_proto::types::date::UTCDate;
 use jmap_tools::{Key, Map, Value};
 use rand::distr::Alphanumeric;
-use std::future::Future;
-use store::{
-    Serialize, ValueKey,
-    rand::{Rng, rng},
-    write::{AlignedBytes, Archive, Archiver, BatchBuilder, now},
-};
+use store::rand::{Rng, rng};
+use store::write::{AlignedBytes, Archive, Archiver, BatchBuilder, now};
+use store::{Serialize, ValueKey};
 use trc::{AddContext, ServerEvent};
-use types::{collection::Collection, field::PrincipalField};
+use types::collection::Collection;
+use types::field::PrincipalField;
 use utils::map::bitmap::Bitmap;
 
 const EXPIRES_MAX: i64 = 7 * 24 * 3600; // 7 days
@@ -284,7 +289,9 @@ fn validate_push_value(
             push.device_client_id = value.into_owned();
         }
         (PushSubscriptionProperty::Url, Value::Str(value))
-            if is_create && value.len() < 512 && value.starts_with("https://") =>
+            if is_create
+                && value.len() < 512
+                && utils::ssrf::is_public_https_url(value.as_ref()) =>
         {
             push.url = value.into_owned();
         }

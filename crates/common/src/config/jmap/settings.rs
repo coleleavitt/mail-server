@@ -4,17 +4,22 @@
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
-use crate::config::groupware::GroupwareConfig;
+use std::str::FromStr;
+use std::time::Duration;
+
 use ahash::{AHashMap, AHashSet};
 use jmap_proto::request::capability::BaseCapabilities;
 use nlp::language::Language;
-use std::{str::FromStr, time::Duration};
-use store::{search::SearchField, write::SearchIndex};
-use types::{collection::Collection, special_use::SpecialUse};
-use utils::{
-    config::{Config, Rate, cron::SimpleCron, utils::ParseValue},
-    map::bitmap::Bitmap,
-};
+use store::search::SearchField;
+use store::write::SearchIndex;
+use types::collection::Collection;
+use types::special_use::SpecialUse;
+use utils::config::cron::SimpleCron;
+use utils::config::utils::ParseValue;
+use utils::config::{Config, Rate};
+use utils::map::bitmap::Bitmap;
+
+use crate::config::groupware::GroupwareConfig;
 
 #[derive(Default, Clone)]
 pub struct JmapConfig {
@@ -77,6 +82,8 @@ pub struct JmapConfig {
 
     pub http_headers: Vec<(hyper::header::HeaderName, hyper::header::HeaderValue)>,
     pub http_use_forwarded: bool,
+    /// Peers allowed to set Forwarded/X-Forwarded-For (`http.trusted-proxies`).
+    pub http_trusted_proxies: Vec<utils::config::ipmask::IpAddrMask>,
 
     pub encrypt: bool,
     pub encrypt_append: bool,
@@ -316,6 +323,28 @@ impl JmapConfig {
                 .property_or_default("email.encryption.append", "false")
                 .unwrap_or(false),
             http_use_forwarded: config.property("http.use-x-forwarded").unwrap_or(false),
+            http_trusted_proxies: {
+                let proxies = config
+                    .properties::<utils::config::ipmask::IpAddrMask>("http.trusted-proxies")
+                    .into_iter()
+                    .map(|(_, mask)| mask)
+                    .collect::<Vec<_>>();
+                if proxies.is_empty() {
+                    // A reverse proxy on the same host
+                    vec![
+                        utils::config::ipmask::IpAddrMask::V4 {
+                            addr: std::net::Ipv4Addr::new(127, 0, 0, 0),
+                            mask: 0xff00_0000,
+                        },
+                        utils::config::ipmask::IpAddrMask::V6 {
+                            addr: std::net::Ipv6Addr::LOCALHOST,
+                            mask: u128::MAX,
+                        },
+                    ]
+                } else {
+                    proxies
+                }
+            },
             http_headers,
             push_attempt_interval: config
                 .property_or_default("jmap.push.attempts.interval", "1m")

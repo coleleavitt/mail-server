@@ -4,34 +4,31 @@
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
-use common::{
-    Server,
-    auth::AccessToken,
-    config::spamfilter::SpamFilterAction,
-    manager::{SPAM_CLASSIFIER_KEY, SPAM_TRAINER_KEY},
-    psl,
-};
-use directory::{
-    Permission,
-    backend::internal::manage::{self, ManageDirectory},
-};
+use std::future::Future;
+use std::net::IpAddr;
+
+use common::auth::AccessToken;
+use common::config::spamfilter::SpamFilterAction;
+use common::manager::{SPAM_CLASSIFIER_KEY, SPAM_TRAINER_KEY};
+use common::{Server, psl};
+use directory::Permission;
+use directory::backend::internal::manage::{self, ManageDirectory};
 use email::message::ingest::EmailIngest;
-use http_proto::{request::decode_path_element, *};
+use http_proto::request::decode_path_element;
+use http_proto::*;
 use hyper::Method;
-use mail_auth::{
-    AuthenticatedMessage, DmarcResult, dmarc::verify::DmarcParameters, spf::verify::SpfParameters,
-};
+use mail_auth::dmarc::verify::DmarcParameters;
+use mail_auth::spf::verify::SpfParameters;
+use mail_auth::{AuthenticatedMessage, DmarcResult};
 use mail_parser::MessageParser;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use spam_filter::{
-    SpamFilterInput,
-    analysis::{init::SpamFilterInit, score::SpamFilterAnalyzeScore},
-    modules::classifier::SpamClassifier,
-};
-use std::future::Future;
-use std::net::IpAddr;
-use store::{ahash::AHashMap, write::BatchBuilder};
+use spam_filter::SpamFilterInput;
+use spam_filter::analysis::init::SpamFilterInit;
+use spam_filter::analysis::score::SpamFilterAnalyzeScore;
+use spam_filter::modules::classifier::SpamClassifier;
+use store::ahash::AHashMap;
+use store::write::BatchBuilder;
 
 pub trait ManageSpamHandler: Sync + Send {
     fn handle_manage_spam(
@@ -147,6 +144,19 @@ impl ManageSpamHandler for Server {
             (Some("train"), request, &Method::GET) => {
                 // Validate the access token
                 access_token.assert_has_permission(Permission::SpamFilterTrain)?;
+
+                // The classifier is shared by every tenant
+                if access_token.tenant.is_some() && request != Some("status") {
+                    trc::bail!(
+                        trc::SecurityEvent::Unauthorized
+                            .into_err()
+                            .details(Permission::SpamFilterTrain.name())
+                            .ctx(
+                                trc::Key::Reason,
+                                "Tenants cannot modify the shared spam classifier"
+                            )
+                    );
+                }
 
                 let result = match request {
                     Some("start") | Some("reset") => {

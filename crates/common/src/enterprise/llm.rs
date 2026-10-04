@@ -125,6 +125,16 @@ pub enum AnthropicContentBlock {
 }
 
 impl AiApiConfig {
+    /// The stored Claude OAuth token is a server-wide credential; only hand it to
+    /// Anthropic's API over verified TLS, never to an arbitrary configured URL.
+    pub fn accepts_anthropic_oauth(&self) -> bool {
+        matches!(self.api_type, ApiType::Anthropic)
+            && !self.tls_allow_invalid_certs
+            && self.url.starts_with("https://")
+            && utils::ssrf::url_host(&self.url)
+                .is_some_and(|host| host.eq_ignore_ascii_case("api.anthropic.com"))
+    }
+
     pub async fn send_request(
         &self,
         prompt: impl Into<String>,
@@ -535,6 +545,22 @@ mod tests {
         config.url = "http://127.0.0.1:9/v1/messages".to_string();
         let err = config.post_api("prompt", None, None).await.unwrap_err();
         assert!(err.contains("No Anthropic credentials"), "{err}");
+    }
+
+    #[test]
+    fn test_oauth_token_only_sent_to_anthropic() {
+        let mut config = create_test_config(ApiType::Anthropic);
+        assert!(config.accepts_anthropic_oauth());
+        config.url = "https://attacker.example/v1/messages".into();
+        assert!(!config.accepts_anthropic_oauth());
+        config.url = "https://api.anthropic.com.attacker.example/v1/messages".into();
+        assert!(!config.accepts_anthropic_oauth());
+        config.url = "http://api.anthropic.com/v1/messages".into();
+        assert!(!config.accepts_anthropic_oauth());
+        config.url = "https://api.anthropic.com/v1/messages".into();
+        config.tls_allow_invalid_certs = true;
+        assert!(!config.accepts_anthropic_oauth());
+        assert!(!create_test_config(ApiType::ChatCompletion).accepts_anthropic_oauth());
     }
 
     #[test]

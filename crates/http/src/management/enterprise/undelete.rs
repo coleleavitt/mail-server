@@ -8,22 +8,26 @@
  *
  */
 
-use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
-use common::{Server, enterprise::undelete::DeletedItemType};
+use std::future::Future;
+use std::str::FromStr;
+
+use base64::Engine;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use common::Server;
+use common::auth::AccessToken;
+use common::enterprise::undelete::DeletedItemType;
 use directory::backend::internal::manage::ManageDirectory;
-use email::{
-    mailbox::INBOX_ID,
-    message::ingest::{EmailIngest, IngestEmail, IngestSource},
-};
-use http_proto::{request::decode_path_element, *};
+use email::mailbox::INBOX_ID;
+use email::message::ingest::{EmailIngest, IngestEmail, IngestSource};
+use http_proto::request::decode_path_element;
+use http_proto::*;
 use hyper::Method;
 use mail_parser::{DateTime, MessageParser};
 use serde_json::json;
-use std::future::Future;
-use std::str::FromStr;
 use store::write::{BatchBuilder, BlobLink, BlobOp};
 use trc::AddContext;
-use types::{blob_hash::BlobHash, collection::Collection};
+use types::blob_hash::BlobHash;
+use types::collection::Collection;
 use utils::url_params::UrlParams;
 
 #[derive(serde::Deserialize, serde::Serialize, Debug)]
@@ -88,7 +92,23 @@ pub trait UndeleteApi: Sync + Send {
         path: Vec<&str>,
         body: Option<Vec<u8>>,
         session: &HttpSessionData,
+        access_token: &AccessToken,
     ) -> impl Future<Output = trc::Result<HttpResponse>> + Send;
+}
+
+/// Resolves the target account, hiding accounts outside the caller's tenant.
+async fn undelete_account_id(
+    server: &Server,
+    account_name: &str,
+    access_token: &AccessToken,
+) -> trc::Result<u32> {
+    server
+        .store()
+        .get_principal_info(account_name)
+        .await?
+        .filter(|principal| principal.has_tenant_access(access_token.tenant_id()))
+        .map(|principal| principal.id)
+        .ok_or_else(|| trc::ResourceEvent::NotFound.into_err())
 }
 
 impl UndeleteApi for Server {
@@ -98,17 +118,12 @@ impl UndeleteApi for Server {
         path: Vec<&str>,
         body: Option<Vec<u8>>,
         session: &HttpSessionData,
+        caller: &AccessToken,
     ) -> trc::Result<HttpResponse> {
         match (path.get(2).copied(), req.method()) {
             (Some(account_name), &Method::GET) => {
                 let account_name = decode_path_element(account_name);
-                let account_id = self
-                    .core
-                    .storage
-                    .data
-                    .get_principal_id(account_name.as_ref())
-                    .await?
-                    .ok_or_else(|| trc::ResourceEvent::NotFound.into_err())?;
+                let account_id = undelete_account_id(self, account_name.as_ref(), caller).await?;
                 let mut deleted = self.core.list_deleted(account_id).await?;
 
                 let params = UrlParams::new(req.uri().query());
@@ -180,13 +195,7 @@ impl UndeleteApi for Server {
             }
             (Some(account_name), &Method::POST) => {
                 let account_name = decode_path_element(account_name);
-                let account_id = self
-                    .core
-                    .storage
-                    .data
-                    .get_principal_id(account_name.as_ref())
-                    .await?
-                    .ok_or_else(|| trc::ResourceEvent::NotFound.into_err())?;
+                let account_id = undelete_account_id(self, account_name.as_ref(), caller).await?;
 
                 let requests: Vec<UndeleteRequest<BlobHash, Collection, u64>> =
                     match serde_json::from_slice::<
@@ -254,6 +263,15 @@ impl UndeleteApi for Server {
                         }
                     };
 
+                // Only blobs deleted from this account may be restored into it.
+                let restorable = self
+                    .core
+                    .list_deleted(account_id)
+                    .await?
+                    .into_iter()
+                    .map(|blob| blob.hash)
+                    .collect::<std::collections::HashSet<_>>();
+
                 let access_token = self
                     .get_access_token(account_id)
                     .await
@@ -262,6 +280,10 @@ impl UndeleteApi for Server {
                 let mut batch = BatchBuilder::new();
                 batch.with_account_id(account_id);
                 for request in requests {
+                    if !restorable.contains(&request.hash) {
+                        results.push(UndeleteResponse::NotFound);
+                        continue;
+                    }
                     match request.collection {
                         Collection::Email => {
                             match self

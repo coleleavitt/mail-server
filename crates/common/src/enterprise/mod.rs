@@ -15,23 +15,26 @@ pub mod license;
 pub mod llm;
 pub mod undelete;
 
+use std::sync::Arc;
+use std::time::Duration;
+
 use ahash::{AHashMap, AHashSet};
-use directory::{
-    QueryParams, Type,
-    backend::internal::{lookup::DirectoryStore, manage::ManageDirectory},
-};
+use directory::backend::internal::lookup::DirectoryStore;
+use directory::backend::internal::manage::ManageDirectory;
+use directory::{QueryParams, Type};
 use license::LicenseKey;
 use llm::AiApiConfig;
 use mail_parser::DateTime;
-use std::{sync::Arc, time::Duration};
 use store::Store;
 use trc::{AddContext, EventType, MetricType};
-use utils::{HttpLimitResponse, config::cron::SimpleCron, template::Template};
+use utils::HttpLimitResponse;
+use utils::config::cron::SimpleCron;
+use utils::template::Template;
 
-use crate::{
-    Core, Server, config::groupware::CalendarTemplateVariable, expr::Expression,
-    manager::webadmin::Resource,
-};
+use crate::config::groupware::CalendarTemplateVariable;
+use crate::expr::Expression;
+use crate::manager::webadmin::Resource;
+use crate::{Core, Server};
 
 #[derive(Clone)]
 pub struct Enterprise {
@@ -232,12 +235,29 @@ impl Server {
 
                 let mut logo = None;
                 if let Some(logo_url) = logo_url {
-                    let response = reqwest::get(logo_url.as_str()).await.map_err(|err| {
+                    // Domain and tenant pictures are set by tenant admins and the
+                    // result is served to anyone: public https hosts only, no
+                    // redirects, images only.
+                    let download_error = |reason: String| {
                         trc::ResourceEvent::DownloadExternal
                             .into_err()
                             .details("Failed to download logo")
-                            .reason(err)
-                    })?;
+                            .ctx(trc::Key::Url, logo_url.clone())
+                            .reason(reason)
+                    };
+                    if !utils::ssrf::is_public_https_url(&logo_url) {
+                        return Err(download_error("logo URL is not a public https URL".into()));
+                    }
+                    let response =
+                        utils::ssrf::public_http_client(std::time::Duration::from_secs(30))
+                            .map_err(|err| download_error(err.to_string()))?
+                            .get(logo_url.as_str())
+                            .send()
+                            .await
+                            .map_err(|err| download_error(err.to_string()))?;
+                    if !response.status().is_success() {
+                        return Err(download_error(format!("status {}", response.status())));
+                    }
 
                     let content_type = response
                         .headers()
@@ -245,6 +265,11 @@ impl Server {
                         .and_then(|ct| ct.to_str().ok())
                         .unwrap_or("image/svg+xml")
                         .to_string();
+                    if !content_type.starts_with("image/") {
+                        return Err(download_error(format!(
+                            "unexpected content type {content_type}"
+                        )));
+                    }
 
                     let contents = response
                         .bytes_with_limit(MAX_IMAGE_SIZE)
